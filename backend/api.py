@@ -11,6 +11,7 @@ from . import auth, db
 from .config import ROOT, GROQ_KEY, ORIGINS, SERVICES, service_url
 from .investigator import Investigator
 from .scenarios import ScenarioController
+from .supplements import saved_evidence
 
 def owned(request, table, record_id):
     user = auth.current(request)
@@ -22,7 +23,47 @@ def owned(request, table, record_id):
 def serialize_investigation(row):
     return {**{key: value for key, value in row.items() if key != "user_id"},
             "report": json.loads(row["report"]) if row["report"] else None,
-            "activity": json.loads(row["activity"]), "usage": json.loads(row["usage"])}
+            "activity": json.loads(row["activity"]), "usage": json.loads(row["usage"]),
+            "supplements": [serialize_supplement(item) for item in db.all_rows(
+                "SELECT * FROM supplements WHERE investigation_id=? AND user_id=? ORDER BY created_at, id",
+                (row["id"], row["user_id"]))]}
+
+def serialize_supplement(row):
+    return {**{k: v for k, v in row.items() if k != "user_id"},
+            "result": json.loads(row["result"]) if row["result"] else None,
+            "source_ids": json.loads(row["source_ids"]), "usage": json.loads(row["usage"])}
+
+def active_jobs(conn, owner):
+    return conn.execute("SELECT COUNT(*) FROM (SELECT id FROM investigations WHERE user_id=? AND state IN ('queued','running','quota_waiting') UNION ALL SELECT id FROM supplements WHERE user_id=? AND state IN ('queued','running','quota_waiting'))",
+                        (owner, owner)).fetchone()[0]
+
+async def investigation_evidence(request):
+    return JSONResponse(saved_evidence(owned(request, "investigations", request.path_params["id"])))
+
+async def start_supplement(request):
+    parent = owned(request, "investigations", request.path_params["id"])
+    auth.csrf(request)
+    data = await auth.body(request)
+    if set(data) - {"retry"} or ("retry" in data and not isinstance(data["retry"], bool)):
+        raise HTTPException(400, "Only an optional boolean retry is supported.")
+    if parent["engine"] != "groq" or parent["state"] != "completed" or not parent["report"]:
+        raise HTTPException(409, "Further analysis requires a completed Groq report.")
+    with db.connection() as conn:
+        # Serialize the check-and-insert across concurrent requests/processes.
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute("SELECT * FROM supplements WHERE investigation_id=? AND user_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+                                (parent["id"], parent["user_id"])).fetchone()
+        if existing and (existing["state"] in {"queued", "running", "quota_waiting", "completed"} or not data.get("retry")):
+            return JSONResponse(serialize_supplement(dict(existing)))
+        if not GROQ_KEY:
+            raise HTTPException(409, "Groq is not configured. Configure the server key to analyze further.")
+        if active_jobs(conn, parent["user_id"]) >= 2:
+            raise HTTPException(429, "You already have two active jobs, including investigations and further analysis.")
+        supplement_id = db.uid()
+        conn.execute("INSERT INTO supplements(id,investigation_id,user_id,state,created_at) VALUES(?,?,?,?,?)",
+                     (supplement_id, parent["id"], parent["user_id"], "queued", db.now()))
+    request.app.state.investigator.enqueue_supplement(supplement_id)
+    return JSONResponse(serialize_supplement(db.one("SELECT * FROM supplements WHERE id=?", (supplement_id,))), status_code=202)
 
 async def health(request):
     return JSONResponse({"status": "ok", "application": "Escalation Desk"})
@@ -105,9 +146,9 @@ async def start_investigation(request):
     if run["state"] in {"starting", "running", "resetting"}:
         raise HTTPException(409, "Wait for the scenario to finish collecting downstream evidence.")
     with db.connection() as conn:
-        active = conn.execute("SELECT id FROM investigations WHERE user_id=? AND state IN ('queued','running','quota_waiting')", (incident["user_id"],)).fetchall()
-        if len(active) >= 2:
-            raise HTTPException(429, "You already have two active investigations (queued, running or waiting for quota).")
+        conn.execute("BEGIN IMMEDIATE")
+        if active_jobs(conn, incident["user_id"]) >= 2:
+            raise HTTPException(429, "You already have two active jobs, including investigations and further analysis.")
         duplicate = conn.execute("SELECT id FROM investigations WHERE incident_id=? AND state IN ('queued','running','quota_waiting')", (incident["id"],)).fetchone()
         if duplicate:
             raise HTTPException(409, "This incident is already being investigated.")
@@ -149,6 +190,8 @@ def create_app():
         Route("/api/incidents/{id}", incident_detail),
         Route("/api/incidents/{id}/investigations", start_investigation, methods=["POST"]),
         Route("/api/investigations/{id}", investigation_detail),
+        Route("/api/investigations/{id}/evidence", investigation_evidence),
+        Route("/api/investigations/{id}/supplements", start_supplement, methods=["POST"]),
         Route("/api/evidence/{id}", evidence_detail),
         Route("/api/scenarios/{scenario}/start", start_scenario, methods=["POST"]),
         Route("/api/scenarios/reset", reset_scenario, methods=["POST"]),

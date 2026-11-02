@@ -18,6 +18,7 @@ export type Evidence = {
   id: string; kind: 'log' | 'span' | 'metric'; service: string; timestamp: string
   message?: string; level?: string; name?: string; trace_id?: string; span_id?: string; parent_id?: string
   duration_ms?: number; status?: string; pool_capacity?: number; pool_in_use?: number
+  started_at?: string; http_status?: number; timeout_ms?: number
   requests?: number; failures?: number; last_latency_ms?: number
   [key: string]: unknown
 }
@@ -34,12 +35,27 @@ export type Report = {
 export type Investigation = {
   id: string; engine: string; state: string; created_at: string; completed_at?: string; error?: string
   report: Report | null; activity: { tool: string; timestamp: string; count: number; evidence_ids?: string[]; omitted_groups?: number; query_limit_reached?: boolean }[]
+  supplements?: Supplement[]
   usage: { model?: string; duration_ms?: number; total_tokens?: number; requests?: number
     progress?: string; retry_at?: string; wait_reason?: string; quota_wait_seconds?: number
-    estimated_input_tokens?: number; supplied_evidence_ids?: string[]
+    estimated_input_tokens?: number; supplied_evidence_ids?: string[]; coverage?: string; available_sources?: number
+    omitted_sources?: number; unavailable_source_ids?: string[]
     diagnostics?: { attempt: number; phase: string; status?: number | string; input_bytes: number
       estimated_input_tokens: number; duration_ms?: number; limit_category?: string; retry_at?: string
       actual_usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }[] }
+}
+export type ReportEvidence = {
+  investigation_id: string; evidence: Evidence[]; source_ids: string[]; unavailable_source_ids: string[]
+  coverage: 'recorded_supplied' | 'legacy_citations_only'; note: string
+}
+export type Supplement = {
+  id: string; investigation_id: string; state: string; created_at: string; started_at?: string; completed_at?: string
+  source_ids: string[]; usage: Investigation['usage']; error?: string
+  result: null | {
+    summary: string; relationship: 'supports' | 'qualifies' | 'disagrees' | 'cannot_assess'
+    explanations: { claim: string; status: 'supported' | 'weakened' | 'unresolved'; supporting_citations: string[]; conflicting_citations: string[] }[]
+    questions: { question: string; suggested_check: string }[]; limitations: string[]
+  }
 }
 export type Detail = { incident: Incident; evidence: Evidence[]; investigations: Investigation[] }
 export type Overview = {

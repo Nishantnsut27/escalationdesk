@@ -73,6 +73,14 @@ When quota is low, the same investigation enters **quota waiting**. The dashboar
 
 Provider diagnostics include HTTP status, known limit category, input bytes, actual token usage and request duration. Scheduling estimates are separately labelled. Credentials, raw provider error bodies and private reasoning are not stored in these diagnostics. Jev remains unconnected.
 
+## Saved reports and further analysis
+
+Open a saved investigation to inspect its hypotheses, individual citations and evidence timeline. The timeline uses that report's recorded supplied sources, with a labelled citation-only fallback for older reports. Missing sources/trace links remain visible. Raw run evidence stays in the separate log/trace/metric tabs. The service map separates reported impact, observed errors and current reachability.
+
+Completed Groq reports offer **Analyze further**. This explicit action reviews the same saved evidence and adds a separate supplement; it makes no telemetry queries and preserves the original report/status/timestamps. Opening or revisiting reports never calls Groq. Supplements can support, qualify, disagree with or be unable to assess the original conclusion. Inspect their citations and limitations; valid source IDs alone do not guarantee correct prose.
+
+The single worker prioritizes fresh investigations over queued supplements. Each supplement has two HTTP attempts at most, a 10 KiB complete request, 2,048 output tokens and the same 120-second waiting/five-minute execution bounds. Original and supplemental usage are shown separately. Duplicate submissions return the existing result; explicit retry after failure/interruption retains the previous attempt. SQLite migration 2 adds separate supplement storage without rewriting original reports.
+
 ## Fresh installation
 
 Use Python 3.14 and a Node version compatible with Vite 7. The versions exercised here were Python 3.14.6 and Node 26.7.0.
@@ -103,7 +111,7 @@ npm test
 npm run build
 ~~~
 
-Verified on 2026-11-02: 35 backend tests, 3 frontend checks, Python compilation and the production frontend build. Two live reports for each failure mechanism passed source/citation review. Each used two HTTP attempts, resumed from a 24 to 30 second quota wait and finished in 30 to 36 seconds. A separate healthy run produced zero failures and zero incidents. Earlier incorrect or rejected attempts are retained; see [status.md](status.md) for case IDs, actual usage and limitations.
+Verified on 2026-11-02: 51 backend tests, 8 frontend checks, Python compilation and the production frontend build. The earlier reliability milestone passed two live original reports per failure mechanism. Live supplement flow checks also exercise quota waiting, separate usage, original preservation, duplicate submission and saved-result retrieval. Semantic source review exposed incomplete citations in early supplements; those results remain retained. See [status.md](status.md) for exact live cases and limitations.
 
 Backend tests start a separate real four-process runtime on ports 8765-8768 with isolated storage under `.cache`. They cover authentication, CSRF, account isolation, both real failure scenarios, healthy traffic, recovery, trace/time filtering before limits, grouped evidence, request-size bounds, citation integrity, quota resumption and budgets, queue limits, restart handling and saved results. Mocked provider checks consume no Groq quota.
 
@@ -115,13 +123,15 @@ Run a live check explicitly, one investigation per invocation (these consume ava
 .\.venv\Scripts\python.exe scripts/live_check.py pool
 .\.venv\Scripts\python.exe scripts/live_check.py slow
 .\.venv\Scripts\python.exe scripts/live_check.py healthy
+.\.venv\Scripts\python.exe scripts/live_check.py pool --supplement
+.\.venv\Scripts\python.exe scripts/live_check.py slow --supplement
 ~~~
 
-The script creates a local verification account with its password kept only in memory. It runs real service traffic, polls progress, signs back in, verifies saved results and all structured citations through the protected API, and writes report/evidence/diagnostic artifacts under `.cache/live-verification/`. Every invocation uses the server's same configured Groq account. Healthy checks make no model call. Review the reported mechanism against the evidence; valid citation IDs alone do not establish semantic correctness.
+The script creates a local verification account with its password kept only in memory. It runs real service traffic, polls progress, signs back in, verifies saved results and all structured citations through the protected API, and writes report/evidence/diagnostic artifacts under `.cache/live-verification/`. `--supplement` explicitly requests one supplement after the original Groq report and verifies that both can be revisited. Every invocation uses the server's same configured Groq account. Healthy checks make no model call. Review the reported mechanism against the evidence; valid citation IDs alone do not establish semantic correctness.
 
 ## Storage and files
 
-- `data/platform.sqlite3`: accounts, session digests, runs, incidents, evidence and investigations.
+- `data/platform.sqlite3`: accounts, session digests, runs, incidents, evidence, investigations and supplements.
 - `data/payment.sqlite3`: reference-service workload.
 - `data/telemetry/`: captured JSONL service observations.
 - `data/*.log`: process diagnostics.

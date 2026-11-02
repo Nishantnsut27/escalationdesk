@@ -12,6 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", choices=["pool", "slow", "healthy"])
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--supplement", action="store_true", help="Explicitly request one further-analysis supplement after the Groq report.")
     args = parser.parse_args()
     directory = ROOT / ".cache" / "live-verification"
     directory.mkdir(parents=True, exist_ok=True)
@@ -29,6 +30,10 @@ def main():
                 if time.monotonic() >= ready_by:
                     raise SystemExit("Local runtime is not ready; start the launcher first.") from None
                 time.sleep(.5)
+        if args.supplement:
+            probe = client.get("/api/investigations/runtime-check/evidence")
+            if probe.status_code != 401:
+                raise SystemExit("Restart the runtime with the saved-report endpoints before consuming live quota.")
         response = client.post("/api/auth/signup", json=account)
         response.raise_for_status()
         client.headers["X-CSRF-Token"] = response.json()["csrf"]
@@ -79,11 +84,53 @@ def main():
             # Reload the saved detail through the account-scoped API.
             saved = client.get("/api/incidents/" + incident["id"]).json()
             assert any(i["id"] == investigation_id and i["report"] == result["report"] for i in saved["investigations"])
-        artifact = {"scenario": args.scenario, "run_id": run_id, "result": result, "evidence": run["evidence"]}
+        # Retain the original result even if a later endpoint or assertion fails.
+        (directory / (investigation_id + ".json")).write_text(json.dumps(
+            {"scenario": args.scenario, "run_id": run_id, "result": result, "evidence": run["evidence"]}, indent=2), encoding="utf-8")
+        supplement = None
+        if args.supplement and result["state"] == "completed":
+            original = client.get("/api/investigations/" + investigation_id).json()
+            assert original.get("supplements", []) == [], "Reading a report must never start further analysis."
+            scope = client.get(f"/api/investigations/{investigation_id}/evidence").json()
+            response = client.post(f"/api/investigations/{investigation_id}/supplements", json={})
+            response.raise_for_status()
+            supplement_id = response.json()["id"]
+            deadline = time.monotonic() + 360
+            previous = None
+            while time.monotonic() < deadline:
+                saved = client.get("/api/investigations/" + investigation_id).json()
+                supplement = next(item for item in saved["supplements"] if item["id"] == supplement_id)
+                state = (supplement["state"], supplement["usage"].get("requests"))
+                if state != previous:
+                    print(json.dumps({"supplement_id": supplement_id, "state": state[0], "attempts": state[1],
+                                      "retry_at": supplement["usage"].get("retry_at")}), flush=True)
+                    previous = state
+                if state[0] not in {"queued", "running", "quota_waiting"}:
+                    break
+                time.sleep(1)
+            assert {k: v for k, v in saved.items() if k != "supplements"} == {k: v for k, v in original.items() if k != "supplements"}
+            assert set(supplement["source_ids"]) <= set(scope["source_ids"])
+            if supplement["result"]:
+                for explanation in supplement["result"]["explanations"]:
+                    for ref in explanation["supporting_citations"] + explanation["conflicting_citations"]:
+                        assert ref in supplement["source_ids"]
+                        assert client.get("/api/evidence/" + ref).status_code == 200
+                # Repeated submission is idempotent, even after completion.
+                duplicate = client.post(f"/api/investigations/{investigation_id}/supplements", json={})
+                assert duplicate.json()["id"] == supplement_id
+            client.post("/api/auth/logout", json={}).raise_for_status()
+            login = client.post("/api/auth/login", json=account)
+            login.raise_for_status()
+            client.headers["X-CSRF-Token"] = login.json()["csrf"]
+            revisited = client.get("/api/investigations/" + investigation_id).json()
+            assert revisited["report"] == original["report"]
+            assert next(item for item in revisited["supplements"] if item["id"] == supplement_id) == supplement
+            print(json.dumps({"supplement": supplement}), flush=True)
+        artifact = {"scenario": args.scenario, "run_id": run_id, "result": result, "evidence": run["evidence"], "supplement": supplement}
         (directory / (investigation_id + ".json")).write_text(json.dumps(artifact, indent=2), encoding="utf-8")
         print(json.dumps({"state": result["state"], "report": result.get("report"), "error": result.get("error"),
                           "usage": result["usage"]}), flush=True)
-        if result["state"] != "completed":
+        if result["state"] != "completed" or (args.supplement and (not supplement or supplement["state"] != "completed")):
             raise SystemExit(1)
 
 if __name__ == "__main__":

@@ -56,7 +56,18 @@ def init():
             user_id TEXT NOT NULL REFERENCES users(id), engine TEXT NOT NULL, state TEXT NOT NULL,
             created_at TEXT NOT NULL, completed_at TEXT, report TEXT, activity TEXT NOT NULL DEFAULT '[]',
             error TEXT, usage TEXT NOT NULL DEFAULT '{}');
+        CREATE TABLE IF NOT EXISTS supplements(
+            id TEXT PRIMARY KEY, investigation_id TEXT NOT NULL REFERENCES investigations(id),
+            user_id TEXT NOT NULL REFERENCES users(id), state TEXT NOT NULL,
+            created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+            result TEXT, source_ids TEXT NOT NULL DEFAULT '[]',
+            usage TEXT NOT NULL DEFAULT '{}', error TEXT);
+        CREATE INDEX IF NOT EXISTS supplements_parent ON supplements(investigation_id, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS supplements_active ON supplements(investigation_id)
+            WHERE state IN ('queued','running','quota_waiting');
+        INSERT OR IGNORE INTO schema_version VALUES(2);
         """)
+        conn.execute("UPDATE supplements SET state='interrupted', completed_at=?, error='Server restarted. Retry further analysis to create a new retained attempt.' WHERE state IN ('queued','running','quota_waiting')", (now(),))
         conn.execute("UPDATE investigations SET state='interrupted', error='Server restarted. Start a new investigation.' WHERE state IN ('queued','running','quota_waiting')")
         conn.execute("UPDATE runs SET state='interrupted', ended_at=? WHERE state IN ('running','starting','resetting')", (now(),))
         conn.execute("UPDATE incidents SET state='interrupted' WHERE state='open'")

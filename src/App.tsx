@@ -5,7 +5,8 @@ import {
   LogOut, Play, Radio, Search, Server, ShieldCheck, Square, Terminal, TriangleAlert, X,
 } from 'lucide-react'
 import { api, ApiError, setCsrf, type Detail, type Evidence, type Incident, type Investigation,
-  type Overview, type Run, type Session, type User } from './api'
+  type Overview, type Run, type Session, type User, type Report, type ReportEvidence } from './api'
+import { Citations, EvidenceTimeline, FullTime, ObservationFields, SupplementPanel, useReportEvidence } from './reports'
 
 const scenarioNames: Record<string, string> = { pool: 'Connection pool exhaustion', slow: 'Slow Payment processing', healthy: 'Healthy checkout' }
 const activeStates = ['starting', 'running', 'resetting']
@@ -64,15 +65,16 @@ function Auth({ onSession }: { onSession: (session: Session) => void }) {
   </div>
 }
 
-function ServiceMap({ overview, evidence }: { overview: Overview | null; evidence: Evidence[] }) {
+export function ServiceMap({ overview, evidence, report, evidenceReady = true }: { overview: Overview | null; evidence: Evidence[]; report?: Report | null; evidenceReady?: boolean }) {
   return <div className="service-map">
     {['gateway', 'order', 'payment'].map((service, i) => {
-      const errors = evidence.filter(row => row.service === service && row.kind === 'span' && row.status === 'error').length
+      const errors = evidence.filter(row => row.service === service && (row.status === 'error' || row.level === 'error' || (row.http_status ?? 0) >= 400)).length
       const up = overview?.services.find(item => item.name === service)?.status === 'healthy'
       return <div className="service-node-wrap" key={service}>
         <div className="service-node"><span className={'node-icon ' + (errors ? 'node-error' : '')}>{service === 'payment' ? <Database size={20} /> : <Server size={20} />}</span>
-          <div><strong>{service}</strong><span>{errors ? errors + ' error spans in run' : 'Independent service'}</span></div>
-          <span className={'service-dot ' + (up ? 'up' : '')} title={up ? 'Service reachable now' : 'Service unreachable'} />
+          <div><strong>{service}</strong>{report && <><span>Reported origin: {report.origin === service ? report.assessment === 'inconclusive' ? 'proposed; inconclusive' : 'yes' : 'not identified here'}</span><span>Reported affected: {report.affected_services.includes(service) ? 'yes' : 'not listed'}</span></>}
+            <span>Observed errors: {evidenceReady ? `${errors}${!errors ? ' in this evidence scope' : ''}` : 'evidence not loaded'}</span><span>Current reachability: {up ? 'reachable' : 'unavailable'}</span></div>
+          <span className={'service-dot ' + (up ? 'up' : '')} aria-hidden="true" />
         </div>{i < 2 && <ArrowRight className="connector" size={18} />}
       </div>
     })}
@@ -83,9 +85,10 @@ function EvidenceTable({ evidence, kind, onOpen }: { evidence: Evidence[]; kind:
   const [query, setQuery] = useState('')
   const rows = evidence.filter(row => row.kind === kind && (!query || JSON.stringify(row).toLowerCase().includes(query.toLowerCase())))
   return <div className="evidence-section">
+    <p className="raw-evidence-note">Raw run evidence · Up to 200 observations across all types. This view may include sources not used by the selected report.</p>
     <div className="evidence-toolbar"><span>{rows.length} {kind === 'span' ? 'measured spans' : kind === 'metric' ? 'metric samples' : 'log entries'}</span><label className="search"><Search size={15} /><input aria-label="Filter evidence" placeholder="Filter evidence…" value={query} onChange={e => setQuery(e.target.value)} /></label></div>
     {rows.length ? <div className="table-scroll"><table><thead><tr><th>Time</th><th>Service</th><th>{kind === 'span' ? 'Operation' : kind === 'metric' ? 'Observation' : 'Message'}</th><th>Source</th></tr></thead>
-      <tbody>{rows.map(row => <tr key={row.id}><td className="mono">{time(row.timestamp)}</td><td><span className="service-label">{row.service}</span></td>
+      <tbody>{rows.map(row => <tr key={row.id}><td className="mono"><FullTime value={row.timestamp} /></td><td><span className="service-label">{row.service}</span></td>
         <td>{kind === 'log' ? <><span className={'log-level ' + row.level}>{row.level}</span>{row.message}</> : kind === 'span' ? <div className="span-cell"><span>{row.name}</span><span className={row.status === 'error' ? 'red-text mono' : 'mono'}>{row.duration_ms?.toFixed(1)} ms</span></div> : <div className="metric-values">{Object.entries(row).filter(([key, value]) => typeof value === 'number' && !['duration_ms'].includes(key)).map(([key, value]) => <span key={key}>{key.replaceAll('_', ' ')} <b>{String(value)}</b></span>)}</div>}</td>
         <td><button className="source-button" onClick={() => onOpen(row.id)} aria-label={'Open evidence ' + shortId(row.id)}>{shortId(row.id)}<ArrowUpRight size={12} /></button></td></tr>)}</tbody></table></div> : <div className="small-empty">No matching evidence in this view.</div>}
   </div>
@@ -93,12 +96,12 @@ function EvidenceTable({ evidence, kind, onOpen }: { evidence: Evidence[]; kind:
 
 function InvestigationActivity({ investigation, onOpen }: { investigation: Investigation; onOpen: (id: string) => void }) {
   return <div className="investigation-activity">
-    {!!investigation.activity.length && <details className="tool-details" open={investigationActiveStates.includes(investigation.state)}><summary>{investigationActiveStates.includes(investigation.state) ? 'Completed tool activity' : 'Recorded tool activity'} <span>{investigation.activity.length} tool calls</span></summary>{investigation.activity.map((entry, i) => <div className="activity-entry" key={i}><Terminal size={14} /><code>{entry.tool}</code><span>{entry.count} sources{entry.omitted_groups ? ` · ${entry.omitted_groups} groups omitted` : ''}{entry.query_limit_reached ? ' · query limit reached' : ''}</span><time>{time(entry.timestamp)}</time><div className="evidence-citations">{entry.evidence_ids?.map(id => <button key={id} onClick={() => onOpen(id)} aria-label={'Open collected evidence ' + shortId(id)}>{shortId(id)}<ArrowUpRight size={12} /></button>)}</div></div>)}</details>}
+    {!!investigation.activity.length && <details className="tool-details" open={investigationActiveStates.includes(investigation.state)}><summary>{investigationActiveStates.includes(investigation.state) ? 'Completed tool activity' : 'Recorded tool activity'} <span>{investigation.activity.length} tool calls</span></summary>{investigation.activity.map((entry, i) => <div className="activity-entry" key={i}><Terminal size={14} /><code>{entry.tool}</code><span>{entry.count} sources{entry.omitted_groups ? ` · ${entry.omitted_groups} groups omitted` : ''}{entry.query_limit_reached ? ' · query limit reached' : ''}</span><FullTime value={entry.timestamp} /><div className="evidence-citations">{entry.evidence_ids?.map(id => <button key={id} onClick={() => onOpen(id)} aria-label={'Open collected evidence ' + shortId(id)}>{shortId(id)}<ArrowUpRight size={12} /></button>)}</div></div>)}</details>}
     {!!investigation.usage.diagnostics?.length && <details className="tool-details"><summary>Provider diagnostics <span>{investigation.usage.requests} HTTP attempts</span></summary><p className="usage-note">{investigation.usage.total_tokens ?? 0} provider-reported tokens · {investigation.usage.estimated_input_tokens ?? 0} estimated input tokens for scheduling · {investigation.usage.quota_wait_seconds ?? 0}s waited</p>{investigation.usage.diagnostics.map(entry => <div key={entry.attempt}><span>#{entry.attempt} {entry.phase}</span><span>{entry.status ?? 'In progress'}{entry.limit_category ? ' · ' + entry.limit_category : ''}</span><span>{entry.input_bytes} bytes · {entry.duration_ms ?? 0}ms</span>{entry.retry_at && <span>Retry {time(entry.retry_at)}</span>}</div>)}</details>}
   </div>
 }
 
-export function ReportView({ investigation, onOpen }: { investigation: Investigation | undefined; onOpen: (id: string) => void }) {
+export function ReportView({ investigation, onOpen, scope = null, evidenceError, onUpdate }: { investigation: Investigation | undefined; onOpen: (id: string) => void; scope?: ReportEvidence | null; evidenceError?: string; onUpdate?: (value: Investigation) => void }) {
   const [clock, setClock] = useState(Date.now())
   useEffect(() => {
     if (investigation?.state !== 'quota_waiting') return
@@ -123,14 +126,17 @@ export function ReportView({ investigation, onOpen }: { investigation: Investiga
   if (!investigation.report) return <><div className="report-empty" role="alert"><TriangleAlert size={28} /><h3>Investigation {investigation.state}</h3><p>{investigation.error || 'Start a new investigation to try again.'}</p><p>Retry creates a new investigation and keeps this attempt in saved history.</p></div><InvestigationActivity investigation={investigation} onOpen={onOpen} /></>
   const report = investigation.report
   return <div className="report-content">
-    <div className="report-meta"><span className="eyebrow"><Fingerprint size={14} /> {investigation.engine === 'rules' ? 'DETERMINISTIC EVIDENCE ANALYSIS' : 'RECORDED GROQ INVESTIGATION'}</span><StateBadge state={report.assessment} /></div>
-    <h3>{report.origin === 'unknown' ? 'More evidence is needed.' : 'The failure originates in ' + report.origin.charAt(0).toUpperCase() + report.origin.slice(1) + '.'}</h3>
+    <div className="report-meta"><span className="eyebrow"><Fingerprint size={14} /> {investigation.engine === 'rules' ? 'RECORDED EVIDENCE RULES ANALYSIS' : 'RECORDED GROQ INVESTIGATION'}</span><StateBadge state={report.assessment} /></div>
+    <h3>{report.assessment === 'inconclusive' || report.origin === 'unknown' ? 'The assessment is inconclusive.' : 'Reported origin: ' + report.origin.charAt(0).toUpperCase() + report.origin.slice(1) + '.'}</h3>
     <p className="report-summary">{report.summary}</p>
     <div className="evidence-citations"><span>Supporting evidence</span>{report.evidence_ids.map(id => <button onClick={() => onOpen(id)} key={id}><FileText size={12} />{shortId(id)}<ArrowUpRight size={12} /></button>)}</div>
+    <section className="report-hypotheses"><h4>Reported hypotheses</h4>{report.hypotheses.length ? report.hypotheses.map((item, index) => <div key={index}><p>{item.claim}</p><Citations ids={item.evidence_ids} onOpen={onOpen} /></div>) : <p>No hypotheses recorded.</p>}</section>
     <div className="recommendations"><span className="tiny-label">RECOMMENDED NEXT STEPS</span>{report.recommendations.map((text, i) => <div key={text}><span className="step-number">{String(i + 1).padStart(2, '0')}</span><p>{text}</p></div>)}</div>
     <div className="limitation"><CircleDot size={17} /><div><strong>What the evidence does not establish</strong>{report.limitations.map(item => <p key={item}>{item}</p>)}</div></div>
-    <div className="report-footer"><span>{investigation.engine === 'rules' ? 'Evidence rules v1 · No model call' : investigation.usage.model}</span><span>{((investigation.usage.duration_ms || 0) / 1000).toFixed(2)}s · Saved {time(investigation.completed_at || investigation.created_at)}</span></div>
+    <div className="report-footer"><span>{investigation.engine === 'rules' ? 'Evidence rules v1 · No model call' : investigation.usage.model} · Original usage: {investigation.usage.requests ?? 0} HTTP attempts · {investigation.usage.total_tokens ?? 0} provider-reported tokens</span><span>{((investigation.usage.duration_ms || 0) / 1000).toFixed(2)}s · Saved <FullTime value={investigation.completed_at || investigation.created_at} /></span></div>
+    <EvidenceTimeline scope={scope} error={evidenceError} onOpen={onOpen} />
     <InvestigationActivity investigation={investigation} onOpen={onOpen} />
+    {investigation.engine === 'groq' && investigation.state === 'completed' && <SupplementPanel key={investigation.id} investigation={investigation} onOpen={onOpen} onUpdate={onUpdate} />}
   </div>
 }
 
@@ -153,12 +159,13 @@ export default function App() {
   const [openedEvidence, setOpenedEvidence] = useState<Evidence | null>(null)
   const [historyId, setHistoryId] = useState('')
   const modalClose = useRef<HTMLButtonElement>(null)
+  const modalReturn = useRef<HTMLElement | null>(null)
   const accountEpoch = useRef(0)
   const pendingRun = useRef('')
 
-  const session = (value: Session) => { accountEpoch.current++; setUser(value.user); setCsrf(value.csrf); setError(''); setOverview(null); setRuns([]); setIncidents([]); setSelected(''); setDetail(null); setSelectedRun(''); setRunEvidence([]); pendingRun.current = '' }
+  const session = (value: Session) => { accountEpoch.current++; setUser(value.user); setCsrf(value.csrf); setOpenedEvidence(null); setHistoryId(''); setError(''); setOverview(null); setRuns([]); setIncidents([]); setSelected(''); setDetail(null); setSelectedRun(''); setRunEvidence([]); pendingRun.current = '' }
   const failure = useCallback((e: unknown) => {
-    if (e instanceof ApiError && e.status === 401) { accountEpoch.current++; setUser(null); setCsrf(''); setSelected(''); setDetail(null) }
+    if (e instanceof ApiError && e.status === 401) { accountEpoch.current++; setUser(null); setOpenedEvidence(null); setCsrf(''); setSelected(''); setDetail(null) }
     setError(e instanceof Error ? e.message : 'Something went wrong. Try again.')
   }, [])
   useEffect(() => { api<Session>('/auth/me').then(session).catch(e => { if (!(e instanceof ApiError && e.status === 401)) failure(e) }).finally(() => setInitializing(false)) }, [failure])
@@ -197,20 +204,25 @@ export default function App() {
   }, [user, latestRunId, failure])
   useEffect(() => {
     if (!openedEvidence) return
-    const previous = document.activeElement as HTMLElement | null
     modalClose.current?.focus()
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpenedEvidence(null)
-      if (e.key === 'Tab') { e.preventDefault(); modalClose.current?.focus() }
+      if (e.key === 'Tab') {
+        const focusable = Array.from(modalClose.current?.closest('section')?.querySelectorAll<HTMLElement>('button, summary, [tabindex="0"]') || [])
+        const first = focusable[0], last = focusable.at(-1)
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus() }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
+      }
     }
     document.addEventListener('keydown', handler)
-    return () => { document.removeEventListener('keydown', handler); previous?.focus() }
+    return () => { document.removeEventListener('keydown', handler); modalReturn.current?.focus() }
   }, [openedEvidence])
 
   const active = runs.find(run => activeStates.includes(run.state))
   const selectedIncidentRun = runs.find(run => run.id === detail?.incident.run_id)
   const evidence = selectedRun || !detail ? runEvidence : detail.evidence
   const investigation = detail?.investigations.find(item => item.id === historyId) || detail?.investigations[0]
+  const { scope, error: evidenceError } = useReportEvidence(selectedRun ? undefined : investigation)
   const investigating = detail?.investigations.some(item => investigationActiveStates.includes(item.state))
   const allServicesUp = overview?.services.every(item => item.status === 'healthy')
   async function startScenario() {
@@ -234,10 +246,12 @@ export default function App() {
     } catch (e) { failure(e) } finally { setBusy('') }
   }
   async function openEvidence(id: string) {
-    try { setOpenedEvidence(await api<Evidence>('/evidence/' + id)) } catch (e) { failure(e) }
+    modalReturn.current = document.activeElement as HTMLElement | null
+    const epoch = accountEpoch.current
+    try { const value = await api<Evidence>('/evidence/' + id); if (epoch === accountEpoch.current) setOpenedEvidence(value) } catch (e) { if (epoch === accountEpoch.current) failure(e) }
   }
   async function logout() {
-    try { await api('/auth/logout', {}); accountEpoch.current++; setUser(null); setCsrf(''); setDetail(null); setSelected(''); setRuns([]); setIncidents([]); setOverview(null); setSelectedRun(''); setRunEvidence([]); pendingRun.current = '' } catch (e) { failure(e) }
+    try { await api('/auth/logout', {}); accountEpoch.current++; setUser(null); setOpenedEvidence(null); setCsrf(''); setDetail(null); setSelected(''); setRuns([]); setIncidents([]); setOverview(null); setSelectedRun(''); setRunEvidence([]); pendingRun.current = '' } catch (e) { failure(e) }
   }
   function navigate(value: string) {
     setNav(value); setSelectedRun(''); setHistoryId('')
@@ -281,7 +295,7 @@ export default function App() {
             { label: 'Evidence captured', value: overview?.counts.evidence || 0, sub: 'Logs, spans & metric samples', icon: FileText, color: 'blue' }].map(stat => <div className="stat-card" key={stat.label}><div><span>{stat.label}</span><span className={'stat-icon ' + stat.color}><stat.icon size={17} /></span></div><strong>{stat.value.toLocaleString()}</strong><p>{stat.sub}</p></div>)}
         </div>
 
-        <section className="topology-panel"><div className="section-heading"><h2><GitBranch size={16} />Service topology</h2><span>Configured dependencies <span className="dot-divider">·</span> Live reachability</span></div><ServiceMap overview={overview} evidence={evidence} /></section>
+        <section className="topology-panel"><div className="section-heading"><h2><GitBranch size={16} />Service topology</h2><span>Configured dependencies · Current reachability</span></div><p className="map-scope">{!selectedRun && investigation?.report ? 'Reported claims and observed errors use the selected saved report. Reachability is checked now.' : 'Observed errors use raw run evidence. Reachability is checked now.'}</p><ServiceMap overview={overview} evidence={!selectedRun && investigation?.report ? scope?.evidence || [] : evidence} report={!selectedRun ? investigation?.report : null} evidenceReady={!!selectedRun || !investigation?.report || !!scope} /></section>
 
         <div className="investigation-workspace">
           <section className="incident-panel">
@@ -305,8 +319,8 @@ export default function App() {
             {(selected || runs.length > 0) ? <>
               <div className="detail-tabs">{(selectedRun || !selected ? [{ key: 'log', name: 'Logs' }, { key: 'span', name: 'Traces' }, { key: 'metric', name: 'Metrics' }] : [{ key: 'assessment', name: 'Assessment' }, { key: 'log', name: 'Logs' }, { key: 'span', name: 'Traces' }, { key: 'metric', name: 'Metrics' }]).map(item => <button className={tab === item.key ? 'active' : ''} key={item.key} onClick={() => setTab(item.key)}>{item.name}{item.key !== 'assessment' && <span>{evidence.filter(row => row.kind === item.key).length}</span>}</button>)}</div>
               {tab === 'assessment' && !selectedRun ? <>
-                {detail && detail.investigations.length > 1 && <div className="history-picker"><label htmlFor="history">Saved investigation</label><select id="history" value={investigation?.id || ''} onChange={e => setHistoryId(e.target.value)}>{detail.investigations.map(item => <option key={item.id} value={item.id}>{time(item.created_at)} · {item.engine} · {item.state}</option>)}</select></div>}
-                <ReportView investigation={investigation} onOpen={openEvidence} />
+                {detail && detail.investigations.length > 1 && <div className="history-picker"><label htmlFor="history">Saved investigation</label><select id="history" value={investigation?.id || ''} onChange={e => setHistoryId(e.target.value)}>{detail.investigations.map(item => <option key={item.id} value={item.id}>{item.created_at} · {item.engine} · {item.state}</option>)}</select></div>}
+                <ReportView investigation={investigation} onOpen={openEvidence} scope={scope} evidenceError={evidenceError} onUpdate={value => setDetail(current => current ? { ...current, investigations: current.investigations.map(item => item.id === value.id ? { ...item, supplements: value.supplements } : item) } : current)} />
               </> : <EvidenceTable key={tab + latestRunId + selected} evidence={evidence} kind={tab === 'assessment' ? 'log' : tab} onOpen={openEvidence} />}
             </> : <div className="workspace-empty"><div className="empty-orbit"><Search size={29} /><span><FileText size={14} /></span></div><h3>Your workspace is ready.</h3><p>Start a service scenario above. We'll capture the requests,<br />connect the symptoms and keep the evidence in one place.</p><div className="empty-steps"><span><b>01</b> Run scenario</span><ArrowRight size={13} /><span><b>02</b> Inspect evidence</span><ArrowRight size={13} /><span><b>03</b> Investigate</span></div></div>}
           </section>
@@ -314,7 +328,7 @@ export default function App() {
         <footer className="page-footer"><span><ShieldCheck size={13} />Account-scoped evidence · Stored locally</span><span>Escalation Desk <span className="footer-slash">/</span> Proof of concept</span></footer>
       </main>
     </div>
-    {openedEvidence && <div className="modal-backdrop" onClick={() => setOpenedEvidence(null)}><section className="evidence-modal" role="dialog" aria-modal="true" aria-labelledby="evidence-title" onClick={e => e.stopPropagation()}><header><div><span className="tiny-label">PRESERVED SOURCE OBSERVATION</span><h2 id="evidence-title">Evidence {shortId(openedEvidence.id)}</h2></div><button ref={modalClose} aria-label="Close evidence" onClick={() => setOpenedEvidence(null)}><X size={20} /></button></header><div className="modal-meta"><span className="service-label">{openedEvidence.service}</span><span>{openedEvidence.kind}</span><time>{new Date(openedEvidence.timestamp).toLocaleString()}</time></div><pre>{JSON.stringify(openedEvidence, null, 2)}</pre><footer><LockKeyhole size={13} />Stored observation from your service run.</footer></section></div>}
+    {openedEvidence && <div className="modal-backdrop" onClick={() => setOpenedEvidence(null)}><section className="evidence-modal" role="dialog" aria-modal="true" aria-labelledby="evidence-title" onClick={e => e.stopPropagation()}><header><div><span className="tiny-label">RECORDED SOURCE OBSERVATION</span><h2 id="evidence-title">Evidence {shortId(openedEvidence.id)}</h2></div><button ref={modalClose} aria-label="Close evidence" onClick={() => setOpenedEvidence(null)}><X size={20} /></button></header><div className="modal-meta"><span className="service-label">{openedEvidence.service}</span><span>{openedEvidence.kind}</span><FullTime value={openedEvidence.timestamp} /></div><div className="modal-body"><ObservationFields row={openedEvidence} /><details><summary>Original recorded JSON</summary><pre>{JSON.stringify(openedEvidence, null, 2)}</pre></details></div><footer><LockKeyhole size={13} />Stored observation from your service run.</footer></section></div>}
   </div>
 }
 

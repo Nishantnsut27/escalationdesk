@@ -1,12 +1,14 @@
 import asyncio
 import json
 import time
+import itertools
 import httpx
 from . import db
 from .config import GROQ_KEY, MODEL
 
 from .evidence import EvidenceTools, EvidenceContext, DEFINITIONS, SERVICES, INPUT_BYTES, encoded
 from .quota import GroqQuota, delay_seconds
+from .supplements import saved_evidence, supplement_payload, validate_supplement
 
 def rule_report(tools, record=None):
     def query(name):
@@ -104,14 +106,18 @@ class Investigator:
     def __init__(self, client, quota=None):
         self.client = client
         self.quota = quota or GroqQuota()
-        self.queue = asyncio.Queue()
+        self.queue = asyncio.PriorityQueue()
+        self.sequence = itertools.count()
         self.worker = None
 
     def start(self):
         self.worker = asyncio.create_task(self.work())
 
     def enqueue(self, investigation_id):
-        self.queue.put_nowait(investigation_id)
+        self.queue.put_nowait((0, next(self.sequence), "investigation", investigation_id))
+
+    def enqueue_supplement(self, supplement_id):
+        self.queue.put_nowait((1, next(self.sequence), "supplement", supplement_id))
 
     async def close(self):
         if self.worker:
@@ -123,9 +129,12 @@ class Investigator:
 
     async def work(self):
         while True:
-            investigation_id = await self.queue.get()
+            _, _, kind, investigation_id = await self.queue.get()
             try:
-                await self.investigate(investigation_id)
+                if kind == "supplement":
+                    await self.supplement(investigation_id)
+                else:
+                    await self.investigate(investigation_id)
             finally:
                 self.queue.task_done()
 
@@ -152,7 +161,8 @@ class Investigator:
         try:
             if investigation["engine"] == "rules":
                 report = rule_report(tools, record)
-                usage = {"model": "evidence-rules-v1", "requests": 0, "label": "Deterministic evidence analysis"}
+                usage = {"model": "evidence-rules-v1", "requests": 0, "label": "Deterministic evidence analysis",
+                         "supplied_evidence_ids": sorted(tools.seen)}
             else:
                 async with asyncio.timeout(300):
                     report, usage = await self.groq(tools, record, usage, progress)
@@ -230,92 +240,8 @@ class Investigator:
                 "For missing relationships use get_trace without service/time filters. Otherwise reply READY.", budget)
 
         async def call(final=False):
-            budget = INPUT_BYTES
-            for attempt in range(2):
-                payload, supplied = build(final, budget)
-                # bytes/2 plus framing is intentionally more conservative than the
-                # usual chars/4 heuristic. It is not billed/provider token usage.
-                estimate = (len(encoded(payload)) + 1) // 2 + 64
-                limit = self.quota.full_token_limit
-                if limit is not None and estimate + payload["max_completion_tokens"] > limit:
-                    budget = min(budget, max(0, (limit - payload["max_completion_tokens"] - 64) * 2))
-                    payload, supplied = build(final, budget)
-                    estimate = (len(encoded(payload)) + 1) // 2 + 64
-                    if estimate + payload["max_completion_tokens"] > limit:
-                        raise ValueError("Groq full token allowance is insufficient for the compact request and required output budget.")
-                maximum = 6 if final else 4
-                if usage["requests"] >= maximum:
-                    raise ValueError("Groq request budget exhausted; report attempts are reserved.")
-                wait, reason = self.quota.required_wait(estimate + payload["max_completion_tokens"])
-                await self.quota.wait(wait, reason, usage, progress, deadline)
-                remaining_time = deadline - self.quota.clock()
-                if remaining_time <= 0:
-                    raise ValueError("Investigation exceeded the five-minute execution deadline.")
-                usage["requests"] += 1
-                usage["estimated_input_tokens"] += estimate
-                tools.supplied = supplied
-                usage["supplied_evidence_ids"] = sorted(supplied)
-                usage["progress"] = "reporting" if final else "querying"
-                diagnostic = {"attempt": usage["requests"], "phase": "report" if final else "tools",
-                              "input_bytes": len(encoded(payload)), "estimated_input_tokens": estimate,
-                              "estimate_method": "UTF-8 bytes / 2 + 64; not provider usage"}
-                usage["diagnostics"].append(diagnostic)
-                progress("running")
-                started = self.quota.clock()
-                response = None
-                try:
-                    response = await self.client.post("https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Authorization": "Bearer " + GROQ_KEY, "Content-Type": "application/json"},
-                        content=encoded(payload), timeout=min(45, remaining_time))
-                    diagnostic["status"] = response.status_code
-                    diagnostic.update(self.quota.observe(response))
-                except httpx.RequestError:
-                    diagnostic["status"] = "connection_failure"
-                finally:
-                    diagnostic["duration_ms"] = round((self.quota.clock() - started) * 1000)
-                    progress("running")
-                status = response.status_code if response is not None else 0
-                if status == 200:
-                    try:
-                        result = response.json()
-                        actual = result.get("usage", {})
-                        diagnostic["actual_usage"] = {k: actual[k] for k in ("prompt_tokens", "completion_tokens", "total_tokens")
-                                                       if isinstance(actual.get(k), int) and actual[k] >= 0}
-                        usage["total_tokens"] += diagnostic["actual_usage"].get("total_tokens", 0)
-                        usage["model"] = result.get("model", MODEL)
-                        choice = result["choices"][0]
-                        if choice.get("finish_reason") in {"length", "stop", "tool_calls", "content_filter"}:
-                            diagnostic["finish_reason"] = choice["finish_reason"]
-                        if choice.get("finish_reason") == "length":
-                            raise ValueError()
-                        message = choice["message"]
-                        if not isinstance(message, dict):
-                            raise ValueError()
-                        return message
-                    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-                        raise ValueError("Groq returned invalid or truncated output; no report was accepted.") from None
-                    finally:
-                        progress("running")
-                if status in {401, 403}:
-                    raise ValueError("Groq authentication or model access failed. Check the configured credential and model access.")
-                if status == 413:
-                    raise ValueError("Groq rejected an oversized request. The available account limit is insufficient for this request.")
-                if status == 400:
-                    raise ValueError("Groq rejected the request or output schema. Check model compatibility; no report was accepted.")
-                if diagnostic.get("request_exceeds_full_allowance"):
-                    budget = min(budget, int(len(encoded(payload)) * self.quota.full_token_limit / diagnostic["requested_tokens"] * .8))
-                retryable = status == 429 or status in {500, 502, 503, 504} or status == 0
-                if not retryable:
-                    raise ValueError(f"Groq request failed (HTTP {status}); no report was accepted.")
-                if attempt == 1 or usage["requests"] >= maximum:
-                    if status == 429:
-                        raise ValueError(f"Groq rate limit ({self.quota.category}) persisted after the permitted retry or request budget. Retry later; collected evidence is preserved.")
-                    raise ValueError("Groq connection failure or temporary server error persisted; retry budget exhausted.")
-                if status != 429:
-                    delay = delay_seconds(response.headers.get("retry-after"), self.quota.clock()) if response is not None else None
-                    await self.quota.wait(delay if delay is not None else 1, "Retrying temporary Groq connection/server failure", usage, progress, deadline)
-                # A 429 may reveal a smaller full allowance. Rebuild/compact before
-                # the retry and fail locally if even the minimum cannot fit.
+            return await self.provider_request(lambda budget: build(final, budget), usage, progress, deadline,
+                6 if final else 4, "report" if final else "tools", lambda ids: setattr(tools, "supplied", ids))
 
         for _ in range(4):
             if usage["requests"] >= 4:
@@ -353,3 +279,131 @@ class Investigator:
         usage["progress"] = "completed"
         return report, usage
 
+
+    async def supplement(self, supplement_id):
+        row = db.one("SELECT * FROM supplements WHERE id=?", (supplement_id,))
+        if not row or row["state"] != "queued":
+            return
+        parent = db.one("SELECT * FROM investigations WHERE id=? AND user_id=?",
+                        (row["investigation_id"], row["user_id"]))
+        started = time.perf_counter()
+        usage = {"requests": 0, "total_tokens": 0, "model": MODEL, "label": "Further analysis",
+                 "diagnostics": [], "quota_wait_seconds": 0, "usage_source": "provider", "estimated_input_tokens": 0}
+        db.execute("UPDATE supplements SET state='running', started_at=? WHERE id=?", (db.now(), supplement_id))
+
+        def progress(state):
+            db.execute("UPDATE supplements SET state=?, usage=? WHERE id=?", (state, json.dumps(usage), supplement_id))
+
+        def supplied(ids):
+            db.execute("UPDATE supplements SET source_ids=? WHERE id=?", (json.dumps(sorted(ids)), supplement_id))
+
+        try:
+            if not GROQ_KEY:
+                raise ValueError("Groq is not configured. Configure the server key and retry further analysis.")
+            scope = saved_evidence(parent)
+            usage.update(coverage=scope["coverage"], available_sources=len(scope["evidence"]),
+                         unavailable_source_ids=scope["unavailable_source_ids"])
+            async with asyncio.timeout(300):
+                message = await self.provider_request(lambda budget: supplement_payload(parent, scope, budget),
+                    usage, progress, self.quota.clock() + 300, 2, "supplement", supplied)
+                try:
+                    result = validate_supplement(json.loads(message["content"]), set(usage["supplied_evidence_ids"]))
+                except (ValueError, TypeError, KeyError):
+                    raise ValueError("Groq returned an invalid supplement or a citation outside the supplied evidence. No supplement was accepted.") from None
+            usage.update(progress="completed", duration_ms=round((time.perf_counter() - started) * 1000),
+                         omitted_sources=len(scope["evidence"]) - len(usage["supplied_evidence_ids"]))
+            db.execute("UPDATE supplements SET state='completed', result=?, completed_at=?, usage=? WHERE id=?",
+                       (json.dumps(result), db.now(), json.dumps(usage), supplement_id))
+        except Exception as exc:
+            message = ("Further analysis exceeded the five-minute execution deadline." if isinstance(exc, TimeoutError)
+                       else str(exc) if isinstance(exc, ValueError) else "Further analysis failed. Check provider access and retry.")
+            usage.update(progress="failed", duration_ms=round((time.perf_counter() - started) * 1000))
+            db.execute("UPDATE supplements SET state='failed', error=?, completed_at=?, usage=? WHERE id=?",
+                       (message[:300], db.now(), json.dumps(usage), supplement_id))
+
+    async def provider_request(self, build, usage, progress, deadline, maximum, phase, on_supplied):
+        budget = INPUT_BYTES
+        for attempt in range(2):
+            payload, supplied = build(budget)
+            # bytes/2 plus framing is intentionally more conservative than the
+            # usual chars/4 heuristic. It is not billed/provider token usage.
+            estimate = (len(encoded(payload)) + 1) // 2 + 64
+            limit = self.quota.full_token_limit
+            if limit is not None and estimate + payload["max_completion_tokens"] > limit:
+                budget = min(budget, max(0, (limit - payload["max_completion_tokens"] - 64) * 2))
+                payload, supplied = build(budget)
+                estimate = (len(encoded(payload)) + 1) // 2 + 64
+                if estimate + payload["max_completion_tokens"] > limit:
+                    raise ValueError("Groq full token allowance is insufficient for the compact request and required output budget.")
+            if usage["requests"] >= maximum:
+                raise ValueError("Groq request budget exhausted; report attempts are reserved.")
+            wait, reason = self.quota.required_wait(estimate + payload["max_completion_tokens"])
+            await self.quota.wait(wait, reason, usage, progress, deadline)
+            remaining_time = deadline - self.quota.clock()
+            if remaining_time <= 0:
+                raise ValueError("Investigation exceeded the five-minute execution deadline.")
+            usage["requests"] += 1
+            usage["estimated_input_tokens"] += estimate
+            on_supplied(supplied)
+            usage["supplied_evidence_ids"] = sorted(supplied)
+            usage["progress"] = "reporting" if phase != "tools" else "querying"
+            diagnostic = {"attempt": usage["requests"], "phase": phase,
+                          "input_bytes": len(encoded(payload)), "estimated_input_tokens": estimate,
+                          "estimate_method": "UTF-8 bytes / 2 + 64; not provider usage"}
+            usage["diagnostics"].append(diagnostic)
+            progress("running")
+            started = self.quota.clock()
+            response = None
+            try:
+                response = await self.client.post("https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": "Bearer " + GROQ_KEY, "Content-Type": "application/json"},
+                    content=encoded(payload), timeout=min(45, remaining_time))
+                diagnostic["status"] = response.status_code
+                diagnostic.update(self.quota.observe(response))
+            except httpx.RequestError:
+                diagnostic["status"] = "connection_failure"
+            finally:
+                diagnostic["duration_ms"] = round((self.quota.clock() - started) * 1000)
+                progress("running")
+            status = response.status_code if response is not None else 0
+            if status == 200:
+                try:
+                    result = response.json()
+                    actual = result.get("usage", {})
+                    diagnostic["actual_usage"] = {k: actual[k] for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+                                                   if isinstance(actual.get(k), int) and actual[k] >= 0}
+                    usage["total_tokens"] += diagnostic["actual_usage"].get("total_tokens", 0)
+                    usage["model"] = result.get("model", MODEL)
+                    choice = result["choices"][0]
+                    if choice.get("finish_reason") in {"length", "stop", "tool_calls", "content_filter"}:
+                        diagnostic["finish_reason"] = choice["finish_reason"]
+                    if choice.get("finish_reason") == "length":
+                        raise ValueError()
+                    message = choice["message"]
+                    if not isinstance(message, dict):
+                        raise ValueError()
+                    return message
+                except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+                    raise ValueError("Groq returned invalid or truncated output; no report was accepted.") from None
+                finally:
+                    progress("running")
+            if status in {401, 403}:
+                raise ValueError("Groq authentication or model access failed. Check the configured credential and model access.")
+            if status == 413:
+                raise ValueError("Groq rejected an oversized request. The available account limit is insufficient for this request.")
+            if status == 400:
+                raise ValueError("Groq rejected the request or output schema. Check model compatibility; no report was accepted.")
+            if diagnostic.get("request_exceeds_full_allowance"):
+                budget = min(budget, int(len(encoded(payload)) * self.quota.full_token_limit / diagnostic["requested_tokens"] * .8))
+            retryable = status == 429 or status in {500, 502, 503, 504} or status == 0
+            if not retryable:
+                raise ValueError(f"Groq request failed (HTTP {status}); no report was accepted.")
+            if attempt == 1 or usage["requests"] >= maximum:
+                if status == 429:
+                    raise ValueError(f"Groq rate limit ({self.quota.category}) persisted after the permitted retry or request budget. Retry later; collected evidence is preserved.")
+                raise ValueError("Groq connection failure or temporary server error persisted; retry budget exhausted.")
+            if status != 429:
+                delay = delay_seconds(response.headers.get("retry-after"), self.quota.clock()) if response is not None else None
+                await self.quota.wait(delay if delay is not None else 1, "Retrying temporary Groq connection/server failure", usage, progress, deadline)
+            # A 429 may reveal a smaller full allowance. Rebuild/compact before
+            # the retry and fail locally if even the minimum cannot fit.

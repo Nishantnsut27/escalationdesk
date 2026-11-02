@@ -1,0 +1,19 @@
+.venv/
+.runtime/
+.cache/
+.ruff_cache/
+node_modules/
+dist/
+data/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+
+# Local planning and progress documents
+/prd.md
+/agent.md
+/status.md
+/phase.md
+

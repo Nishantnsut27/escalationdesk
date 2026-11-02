@@ -1,0 +1,89 @@
+import json
+import sqlite3
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from .config import DATA
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+def uid():
+    return uuid.uuid4().hex
+
+@contextmanager
+def connection():
+    conn = sqlite3.connect(DATA / "platform.sqlite3", timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def init():
+    DATA.mkdir(parents=True, exist_ok=True)
+    with connection() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
+        INSERT OR IGNORE INTO schema_version VALUES(1);
+        CREATE TABLE IF NOT EXISTS users(
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions(
+            digest TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS runs(
+            id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), scenario TEXT NOT NULL,
+            state TEXT NOT NULL, created_at TEXT NOT NULL, ended_at TEXT,
+            requests INTEGER DEFAULT 0, failures INTEGER DEFAULT 0, error TEXT);
+        CREATE TABLE IF NOT EXISTS incidents(
+            id TEXT PRIMARY KEY, run_id TEXT UNIQUE NOT NULL REFERENCES runs(id),
+            user_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL,
+            state TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT);
+        CREATE TABLE IF NOT EXISTS evidence(
+            id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+            user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL,
+            service TEXT NOT NULL, timestamp TEXT NOT NULL, payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS evidence_run ON evidence(run_id, timestamp);
+        CREATE INDEX IF NOT EXISTS incidents_owner ON incidents(user_id, created_at);
+        CREATE TABLE IF NOT EXISTS investigations(
+            id TEXT PRIMARY KEY, incident_id TEXT NOT NULL REFERENCES incidents(id),
+            user_id TEXT NOT NULL REFERENCES users(id), engine TEXT NOT NULL, state TEXT NOT NULL,
+            created_at TEXT NOT NULL, completed_at TEXT, report TEXT, activity TEXT NOT NULL DEFAULT '[]',
+            error TEXT, usage TEXT NOT NULL DEFAULT '{}');
+        """)
+        conn.execute("UPDATE investigations SET state='interrupted', error='Server restarted. Start a new investigation.' WHERE state IN ('queued','running')")
+        conn.execute("UPDATE runs SET state='interrupted', ended_at=? WHERE state IN ('running','starting','resetting')", (now(),))
+        conn.execute("UPDATE incidents SET state='interrupted' WHERE state='open'")
+
+def one(sql, args=()):
+    with connection() as conn:
+        row = conn.execute(sql, args).fetchone()
+        return dict(row) if row else None
+
+def all_rows(sql, args=()):
+    with connection() as conn:
+        return [dict(row) for row in conn.execute(sql, args)]
+
+def execute(sql, args=()):
+    with connection() as conn:
+        conn.execute(sql, args)
+
+def evidence(run_id, owner, kind=None, service=None, limit=100):
+    sql = "SELECT * FROM evidence WHERE run_id=? AND user_id=?"
+    args = [run_id, owner]
+    if kind:
+        sql += " AND kind=?"
+        args.append(kind)
+    if service:
+        sql += " AND service=?"
+        args.append(service)
+    rows = all_rows(sql + " ORDER BY timestamp LIMIT ?", (*args, min(limit, 200)))
+    return [{**{k: v for k, v in row.items() if k not in ("user_id", "run_id", "payload")},
+             **json.loads(row["payload"])} for row in rows]
+

@@ -1,3 +1,4 @@
+# Local dependencies and runtime artifacts
 .venv/
 .runtime/
 .cache/
@@ -6,7 +7,27 @@ node_modules/
 dist/
 data/
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Generated checks, coverage and incremental builds
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+*.tsbuildinfo
+
+# Local logs and operating-system metadata
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local secrets (keep the checked-in configuration example)
 .env
 .env.*
 !.env.example

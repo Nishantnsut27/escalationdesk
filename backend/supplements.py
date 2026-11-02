@@ -3,7 +3,7 @@ import json
 from copy import deepcopy
 from . import db
 from .config import MODEL
-from .evidence import INPUT_BYTES, encoded, evidence_tables, timing_comparisons, http_exchanges
+from .evidence import INPUT_BYTES, encoded, evidence_tables, timing_comparisons, http_exchanges, model_observation
 
 
 def report_citations(report):
@@ -19,15 +19,15 @@ def saved_evidence(investigation):
     report = json.loads(investigation["report"]) if investigation["report"] else {}
     recorded = isinstance(usage.get("supplied_evidence_ids"), list)
     ids = list(dict.fromkeys(usage["supplied_evidence_ids"] if recorded else report_citations(report)))
-    incident = db.one("SELECT run_id FROM incidents WHERE id=? AND user_id=?",
-                      (investigation["incident_id"], investigation["user_id"]))
+    run_id, collection_id = db.investigation_scope(investigation)
+    field, scope_id = ("collection_id", collection_id) if collection_id else ("run_id", run_id)
     rows = []
     # Chunking avoids SQLite's variable limit without imposing the incident API's cap.
     for offset in range(0, len(ids), 400):
         chunk = ids[offset:offset + 400]
-        found = db.all_rows("SELECT * FROM evidence WHERE user_id=? AND run_id=? AND id IN (" +
+        found = db.all_rows(f"SELECT * FROM evidence WHERE user_id=? AND {field}=? AND id IN (" +
                             ",".join("?" for _ in chunk) + ")",
-                            (investigation["user_id"], incident["run_id"], *chunk))
+                            (investigation["user_id"], scope_id, *chunk))
         rows.extend({**json.loads(row["payload"]), **{k: row[k] for k in ("id", "kind", "service", "timestamp")}}
                     for row in found)
     by_id = {row["id"]: row for row in rows}
@@ -35,7 +35,7 @@ def saved_evidence(investigation):
     return {"investigation_id": investigation["id"], "evidence": [by_id[ref] for ref in ids if ref in by_id],
             "source_ids": ids, "unavailable_source_ids": unavailable,
             "coverage": "recorded_supplied" if recorded else "legacy_citations_only",
-            "note": ("Recorded sources supplied to this report; other run evidence is excluded." if recorded else
+            "note": ("Recorded sources supplied to this report; other collection/run evidence is excluded." if recorded else
                      "Legacy report: supplied-source metadata was not recorded. Only cited sources are available here.")}
 
 
@@ -123,7 +123,7 @@ SYSTEM = (
 
 def supplement_payload(parent, scope, budget=INPUT_BYTES):
     report = json.loads(parent["report"])
-    rows = scope["evidence"]
+    rows = [model_observation(row) for row in scope["evidence"]]
     if not rows:
         raise ValueError("No saved source observations are available for further analysis.")
     essential = set(report_citations(report))

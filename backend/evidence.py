@@ -18,10 +18,13 @@ COMMON = {
     "start_time": {"type": "string", "description": "Inclusive ISO-8601 timestamp with timezone."},
     "end_time": {"type": "string", "description": "Inclusive ISO-8601 timestamp with timezone."},
     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+    "offset": {"type": "integer", "minimum": 0, "maximum": 5000},
 }
 TRACE = {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "Nonzero W3C trace ID."}
 PROPERTIES = {
-    "search_logs": {**COMMON, "trace_id": TRACE},
+    "search_logs": {**COMMON, "trace_id": TRACE,
+                    "query": {"type": "string", "maxLength": 200, "description": "Literal message substring."},
+                    "level": {"type": "string", "enum": ["trace", "debug", "info", "warning", "error", "unknown"]}},
     "get_metrics": COMMON,
     "find_traces": COMMON,
     "get_trace": {**COMMON, "trace_id": TRACE},
@@ -29,7 +32,7 @@ PROPERTIES = {
 }
 DEFINITIONS = [{"type": "function", "function": {
     "name": name, "description": {
-        "search_logs": "Read logs scoped to this incident's account and run.",
+        "search_logs": "Read retained logs in this investigation; filter messages/levels or page with offset.",
         "get_metrics": "Read metric samples, including pool usage and capacity.",
         "find_traces": "Find measured operation spans; use get_trace for a complete trace.",
         "get_trace": "Read spans in one trace, preserving parent relationships and timings.",
@@ -48,8 +51,21 @@ def parse_time(value):
         raise ValueError("Time windows require ISO-8601 timestamps with a timezone.") from None
 
 class EvidenceTools:
-    def __init__(self, run_id, owner, *, groq=False):
+    def __init__(self, run_id, owner, *, groq=False, collection_id=None):
         self.run_id, self.owner, self.groq = run_id, owner, groq
+        self.collection_id = collection_id
+        self.collection = db.one("SELECT * FROM collections WHERE id=? AND user_id=?", (collection_id, owner)) if collection_id else None
+        if collection_id and not self.collection:
+            raise ValueError("Evidence collection is unavailable.")
+        self.services = set(json.loads(self.collection["summary"])["services"]) if self.collection else SERVICES
+        self.definitions = deepcopy(DEFINITIONS)
+        if self.collection:
+            for definition in self.definitions:
+                properties = definition["function"]["parameters"]["properties"]
+                if "service" in properties:
+                    properties["service"]["enum"] = sorted(self.services)
+                if "trace_id" in properties:
+                    properties["trace_id"] = {"type": "string", "maxLength": 128, "description": "Recorded trace ID."}
         self.seen = {}
         self.supplied = set()
 
@@ -59,33 +75,48 @@ class EvidenceTools:
         if set(arguments) - set(PROPERTIES[name]):
             raise ValueError("Unsupported tool argument")
         args = dict(arguments)
-        if "service" in args and (not isinstance(args["service"], str) or args["service"] not in SERVICES):
+        if "service" in args and (not isinstance(args["service"], str) or args["service"] not in self.services):
             raise ValueError("Invalid service")
         if "trace_id" in args or name == "get_trace":
             trace = args.get("trace_id")
-            if not isinstance(trace, str) or not re.fullmatch(r"[0-9a-f]{32}", trace) or int(trace, 16) == 0:
+            if not isinstance(trace, str) or not (re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", trace) if self.collection else
+                    re.fullmatch(r"[0-9a-f]{32}", trace) and int(trace, 16) != 0):
                 raise ValueError("A valid nonzero trace_id is required")
         for field in ("start_time", "end_time"):
             if field in args:
                 args[field] = parse_time(args[field])
         if args.get("start_time", "") > args.get("end_time", "~"):
             raise ValueError("Time window start must not follow its end")
+        offset = args.get("offset", 0)
+        if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= 5000:
+            raise ValueError("Offset must be between zero and 5000")
+        if "query" in args and (not isinstance(args["query"], str) or not 1 <= len(args["query"]) <= 200):
+            raise ValueError("Search query must be 1-200 characters")
+        if "level" in args and args["level"] not in PROPERTIES["search_logs"]["level"]["enum"]:
+            raise ValueError("Invalid log level")
         limit = args.pop("limit", 20 if self.groq else 100)
         maximum = 50 if self.groq else 100
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= maximum:
             raise ValueError(f"Limit must be between 1 and {maximum}")
         if name == "get_topology":
-            return {"configured_edges": [["gateway", "order"], ["order", "payment"]]}
+            return ({"configured_edges": [], "note": "No configured topology supplied. Missing trace links are not inferred."}
+                    if self.collection else {"configured_edges": [["gateway", "order"], ["order", "payment"]]})
         kind = {"search_logs": "log", "get_metrics": "metric", "find_traces": "span", "get_trace": "span"}[name]
-        rows = db.evidence(self.run_id, self.owner, kind, limit=limit + (1 if self.groq else 0), **args)
+        rows = db.evidence(self.run_id, self.owner, kind, limit=limit + (1 if self.groq else 0), collection_id=self.collection_id, **args)
         selected = rows[:limit]
         self.seen.update({row["id"]: row for row in selected})
         if not self.groq:
             return selected
-        result = compact(selected, TOOL_BYTES)
+        result = compact([model_observation(row) for row in selected], TOOL_BYTES)
         result["query_limit_reached"] = len(rows) > limit
+        if self.collection and kind not in json.loads(self.collection["summary"])["kinds"]:
+            result["note"] = "This evidence kind was not supplied; it is unavailable, not proof of healthy operation."
         # Reserve space for the limit disclosure in compact().
         return result
+
+def model_observation(row):
+    # Original redacted content remains inspectable; avoid repeating it in model input.
+    return {key: value for key, value in row.items() if key not in {"original", "source_format", "source_id"}}
 
 # All source observations remain in storage. Grouping retains a real representative,
 # never manufactures a composite source ID or overwrites the original.
@@ -119,7 +150,7 @@ def representatives(rows):
         buckets.setdefault((row["kind"], row["service"]), []).append(row)
     for bucket in buckets.values():
         bucket.sort(key=lambda r: (not (r.get("status") == "error" or r.get("level") == "error"
-                                      or r.get("duration_ms", 0) >= 2000), r.get("timestamp", "")))
+                                      or r.get("duration_ms", 0) >= 2000), r.get("timestamp") or ""))
         def state(row):
             return (row.get("status"), row.get("level"), row.get("http_status"),
                     row.get("duration_ms", 0) >= 2000,
@@ -150,7 +181,8 @@ def timing_comparisons(rows):
             continue
         operations = []
         for span in spans.values():
-            if span["service"] != log["downstream"] or span.get("trace_id") != log.get("trace_id"):
+            if (span["service"] != log["downstream"] or not log.get("trace_id") or not log.get("span_id")
+                    or span.get("trace_id") != log.get("trace_id") or not isinstance(span.get("duration_ms"), (int, float))):
                 continue
             path, parent = [span["id"]], span.get("parent_id")
             visited = set()
@@ -162,7 +194,7 @@ def timing_comparisons(rows):
                 path.append(ancestor["id"])
                 parent = ancestor.get("parent_id")
             if parent == log.get("span_id"):
-                operations.append({"source": span["id"], "operation": span["name"], "duration_ms": span["duration_ms"],
+                operations.append({"source": span["id"], "operation": span.get("name", "Unnamed span"), "duration_ms": span["duration_ms"],
                                    "exceeds_caller_timeout": span["duration_ms"] > log["timeout_ms"],
                                    "relationship_sources": path})
         if operations:
@@ -179,7 +211,7 @@ def http_exchanges(rows):
         if log["kind"] != "log" or not log.get("downstream"):
             continue
         span = spans.get((log.get("trace_id"), log.get("span_id")))
-        if span is None:
+        if span is None or not log.get("trace_id") or not log.get("span_id") or "duration_ms" not in span:
             continue
         if "http_status" in log:
             event = {"event": "received_downstream_error_response", "response_status": log["http_status"]}
@@ -231,6 +263,9 @@ class EvidenceContext:
                                     "tables": evidence_tables(evidence["records"])}, "topology": self.topology,
                        "measured_timing_comparisons": timing_comparisons(evidence["records"]),
                        "observed_http_exchanges": http_exchanges(evidence["records"])}
+            if self.tools.collection:
+                context["import"] = {"symptom_claim": self.tools.collection["symptom"],
+                                     "coverage": json.loads(self.tools.collection["summary"])}
             payload = {**base, "messages": [{"role": "system", "content": system},
                 {"role": "user", "content": instruction + "\nOperational data: " + encoded(context).decode()}]}
             supplied = sorted({row["id"] for row in evidence["records"]})
@@ -241,6 +276,10 @@ class EvidenceContext:
                 schema["properties"]["hypotheses"]["items"]["properties"]["evidence_ids"]["items"]["enum"] = supplied
             excess = len(encoded(payload)) - budget
             if excess <= 0:
+                if self.records and not supplied:
+                    raise ValueError("No useful observation fits the complete Groq input bound. Import smaller observations.")
+                if self.trace_sources and not self.trace_sources <= set(supplied):
+                    raise ValueError("The requested trace group cannot fit intact within the Groq input bound.")
                 return payload, set(supplied)
             evidence_budget -= max(128, excess)
         raise ValueError("Groq input allowance is insufficient for the required request schema.")

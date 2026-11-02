@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, type Evidence, type Investigation, type ReportEvidence, type Supplement } from './api'
 
-export function FullTime({ value }: { value: string }) {
+export function FullTime({ value }: { value: string | null | undefined }) {
+  if (!value || !Number.isFinite(Date.parse(value))) return <span>Timestamp not recorded</span>
   return <time dateTime={value} title={new Date(value).toLocaleString()}>{value}</time>
 }
 
@@ -28,9 +29,12 @@ export function useReportEvidence(investigation?: Investigation) {
 }
 
 export function orderedEvidence(rows: Evidence[]) {
+  const stamp = (row: Evidence) => {
+    const value = Date.parse((row.kind === 'span' && row.started_at ? row.started_at : row.timestamp) || '')
+    return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY
+  }
   return [...new Map(rows.map(row => [row.id, row])).values()].sort((a, b) =>
-    Date.parse(a.kind === 'span' && a.started_at ? a.started_at : a.timestamp) -
-    Date.parse(b.kind === 'span' && b.started_at ? b.started_at : b.timestamp) || a.id.localeCompare(b.id))
+    stamp(a) - stamp(b) || (a.source_line ?? 0) - (b.source_line ?? 0) || a.id.localeCompare(b.id))
 }
 
 export function traceCoverage(row: Evidence, rows: Evidence[]) {
@@ -48,14 +52,14 @@ export function ObservationFields({ row }: { row: Evidence }) {
     started_at: 'Started at', duration_ms: 'Duration (ms)', http_status: 'HTTP response status', timeout_ms: 'Explicit timeout (ms)',
     downstream: 'Downstream service', pool_capacity: 'Pool capacity', pool_in_use: 'Connections in use',
     trace_id: 'Trace ID', span_id: 'Span ID', parent_id: 'Parent span ID' }
-  return <dl className="observation-fields">{Object.entries(row).filter(([key]) => !['id', 'kind', 'service', 'timestamp', 'run_id'].includes(key)).map(([key, value]) =>
+  return <dl className="observation-fields">{Object.entries(row).filter(([key]) => !['id', 'kind', 'service', 'timestamp', 'run_id', 'collection_id', 'original'].includes(key)).map(([key, value]) =>
     <div key={key}><dt>{labels[key] || key.replaceAll('_', ' ')}</dt><dd>{typeof value === 'object' ? JSON.stringify(value) : String(value ?? 'Not recorded')}</dd></div>)}</dl>
 }
 
 export function EvidenceTimeline({ scope, error, onOpen }: { scope: ReportEvidence | null; error?: string; onOpen: (id: string) => void }) {
   const rows = orderedEvidence(scope?.evidence || [])
   return <section className="evidence-timeline" aria-label="Evidence timeline"><h4>Evidence timeline</h4>
-    <p className="report-note">Recorded telemetry for the selected report. Ordered by recorded span start, otherwise observation time. Chronology alone does not establish causation. Investigation activity is shown separately below.</p>
+    <p className="report-note">Recorded telemetry for the selected report. Ordered by recorded span start, otherwise observation time. Untimed observations follow in source order. Chronology alone does not establish causation. Investigation activity is shown separately below.</p>
     {error ? <p role="alert">{error}</p> : !scope ? <p role="status">Loading saved report evidence…</p> : <>
       <p className="coverage-note">{scope.note} {rows.length} of {scope.source_ids.length} sources available.</p>
       {!!scope.unavailable_source_ids.length && <details className="missing-sources"><summary>{scope.unavailable_source_ids.length} saved sources unavailable</summary>{scope.unavailable_source_ids.map(id => <code key={id}>{id}</code>)}</details>}

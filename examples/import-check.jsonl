@@ -1,0 +1,5 @@
+{"id":"catalog-ok","timestamp":"2026-11-03T10:00:00Z","service":"catalog","level":"info","message":"Product lookup completed","request_id":"example-request-1"}
+{"id":"billing-error","timestamp":"2026-11-03T10:00:01Z","service":"billing","level":"error","message":"TypeError: amount is null in calculate_total","request_id":"example-request-1","http_status":500}
+{"id":"billing-error","timestamp":"2026-11-03T10:00:01Z","service":"billing","level":"error","message":"TypeError: amount is null in calculate_total","request_id":"example-request-1","http_status":500}
+{"id":"auth-note","service":"auth","level":"warning","message":"Check request configuration: api_key=EXAMPLE-ONLY-NOT-A-REAL-KEY"}
+{"id":"billing-ok","timestamp":"2026-11-03T10:00:05Z","service":"billing","level":"info","message":"A later request completed","request_id":"example-request-2","http_status":200}

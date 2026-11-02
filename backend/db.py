@@ -4,6 +4,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from .config import DATA
+from .migrations import migrate_collections
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -67,6 +68,7 @@ def init():
             WHERE state IN ('queued','running','quota_waiting');
         INSERT OR IGNORE INTO schema_version VALUES(2);
         """)
+        migrate_collections(conn)
         conn.execute("UPDATE supplements SET state='interrupted', completed_at=?, error='Server restarted. Retry further analysis to create a new retained attempt.' WHERE state IN ('queued','running','quota_waiting')", (now(),))
         conn.execute("UPDATE investigations SET state='interrupted', error='Server restarted. Start a new investigation.' WHERE state IN ('queued','running','quota_waiting')")
         conn.execute("UPDATE runs SET state='interrupted', ended_at=? WHERE state IN ('running','starting','resetting')", (now(),))
@@ -85,23 +87,45 @@ def execute(sql, args=()):
     with connection() as conn:
         conn.execute(sql, args)
 
-def evidence(run_id, owner, kind=None, service=None, limit=100, trace_id=None, start_time=None, end_time=None):
-    sql = "SELECT * FROM evidence WHERE run_id=? AND user_id=?"
-    args = [run_id, owner]
-    if kind:
-        sql += " AND kind=?"
-        args.append(kind)
-    if service:
-        sql += " AND service=?"
-        args.append(service)
+def investigation_scope(investigation):
+    collection_id = investigation.get("collection_id")
+    if collection_id:
+        return None, collection_id
+    incident = one("SELECT run_id FROM incidents WHERE id=? AND user_id=?",
+                   (investigation["incident_id"], investigation["user_id"]))
+    if not incident:
+        raise ValueError("Investigation evidence scope is unavailable.")
+    return incident["run_id"], None
+
+
+def public_evidence(row):
+    return {**json.loads(row["payload"]),
+            **{key: row[key] for key in ("id", "kind", "service", "timestamp") }}
+
+
+def evidence(run_id, owner, kind=None, service=None, limit=100, trace_id=None,
+             start_time=None, end_time=None, *, collection_id=None, offset=0, query=None, level=None):
+    field, scope = ("collection_id", collection_id) if collection_id else ("run_id", run_id)
+    sql = f"SELECT * FROM evidence WHERE {field}=? AND user_id=?"
+    args = [scope, owner]
+    for key, value in (("kind", kind), ("service", service)):
+        if value:
+            sql += f" AND {key}=?"
+            args.append(value)
     if trace_id:
         sql += " AND json_extract(payload, '$.trace_id')=?"
         args.append(trace_id)
+    if level:
+        sql += " AND json_extract(payload, '$.level')=?"
+        args.append(level)
+    if query:
+        sql += " AND instr(lower(COALESCE(json_extract(payload, '$.message'),'')), lower(?))>0"
+        args.append(query)
     for value, operator in ((start_time, ">="), (end_time, "<=")):
         if value:
             sql += f" AND julianday(timestamp){operator}julianday(?)"
             args.append(value)
-    rows = all_rows(sql + " ORDER BY timestamp, id LIMIT ?", (*args, min(limit, 200)))
-    return [{**{k: v for k, v in row.items() if k not in ("user_id", "run_id", "payload")},
-             **json.loads(row["payload"])} for row in rows]
+    rows = all_rows(sql + " ORDER BY timestamp IS NULL, julianday(timestamp), COALESCE(json_extract(payload, '$.source_line'),0), id LIMIT ? OFFSET ?",
+                    (*args, min(limit, 201), offset))
+    return [public_evidence(row) for row in rows]
 

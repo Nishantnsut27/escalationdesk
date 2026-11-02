@@ -1,4 +1,5 @@
 import json
+import asyncio
 from contextlib import asynccontextmanager
 import httpx
 from starlette.applications import Starlette
@@ -12,6 +13,8 @@ from .config import ROOT, GROQ_KEY, ORIGINS, SERVICES, service_url
 from .investigator import Investigator
 from .scenarios import ScenarioController
 from .supplements import saved_evidence
+from .provider import groq_http_client
+from .imports import read_import, create_collection, public_collection
 
 def owned(request, table, record_id):
     user = auth.current(request)
@@ -36,6 +39,78 @@ def serialize_supplement(row):
 def active_jobs(conn, owner):
     return conn.execute("SELECT COUNT(*) FROM (SELECT id FROM investigations WHERE user_id=? AND state IN ('queued','running','quota_waiting') UNION ALL SELECT id FROM supplements WHERE user_id=? AND state IN ('queued','running','quota_waiting'))",
                         (owner, owner)).fetchone()[0]
+
+
+async def import_logs(request):
+    user = auth.current(request)
+    auth.csrf(request)
+    data = await read_import(request)
+    collection_id, created = await asyncio.to_thread(create_collection, user["id"], data)
+    return JSONResponse(public_collection(owned(request, "collections", collection_id)), status_code=201 if created else 200)
+
+
+async def collections(request):
+    user = auth.current(request)
+    return JSONResponse([public_collection(row) for row in db.all_rows(
+        "SELECT * FROM collections WHERE user_id=? ORDER BY created_at DESC, id DESC", (user["id"],))])
+
+
+async def collection_detail(request):
+    row = owned(request, "collections", request.path_params["id"])
+    return JSONResponse({"collection": public_collection(row),
+        "investigations": [serialize_investigation(item) for item in db.all_rows(
+            "SELECT * FROM investigations WHERE collection_id=? AND user_id=? ORDER BY created_at DESC, id DESC",
+            (row["id"], row["user_id"]))]})
+
+
+async def collection_evidence(request):
+    row = owned(request, "collections", request.path_params["id"])
+    params = dict(request.query_params)
+    if set(params) - {"kind", "service", "query", "level", "offset", "limit"}:
+        raise HTTPException(400, "Unsupported evidence filter.")
+    try:
+        limit, offset = int(params.pop("limit", "100")), int(params.pop("offset", "0"))
+        if not 1 <= limit <= 200 or not 0 <= offset <= 5000:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(400, "Use a limit of 1-200 and offset of 0-5000.") from None
+    kind = params.pop("kind", None)
+    if kind not in {None, "log", "span", "metric"}:
+        raise HTTPException(400, "Unknown evidence kind.")
+    if "service" in params and params["service"] not in json.loads(row["summary"])["services"]:
+        raise HTTPException(400, "Unknown service in this collection.")
+    if "query" in params and not 1 <= len(params["query"]) <= 200:
+        raise HTTPException(400, "Use a search query of 1-200 characters.")
+    if "level" in params and params["level"] not in {"trace", "debug", "info", "warning", "error", "unknown"}:
+        raise HTTPException(400, "Unknown log level.")
+    rows = db.evidence(None, row["user_id"], kind, collection_id=row["id"], limit=limit + 1, offset=offset, **params)
+    return JSONResponse({"collection_id": row["id"], "evidence": rows[:limit],
+                         "next_offset": offset + limit if len(rows) > limit else None})
+
+
+async def start_collection_investigation(request):
+    collection = owned(request, "collections", request.path_params["id"])
+    auth.csrf(request)
+    data = await auth.body(request)
+    engine = data.get("engine", "rules")
+    if set(data) - {"engine"} or engine not in {"rules", "groq"}:
+        raise HTTPException(400, "Choose evidence rules or Groq.")
+    if engine == "groq" and not GROQ_KEY:
+        raise HTTPException(409, "Groq is not configured. Use evidence rules or configure the server key.")
+    with db.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        duplicate = conn.execute("SELECT id FROM investigations WHERE collection_id=? AND state IN ('queued','running','quota_waiting')",
+                                 (collection["id"],)).fetchone()
+        if duplicate:
+            return JSONResponse({"id": duplicate["id"]}, status_code=202)
+        if active_jobs(conn, collection["user_id"]) >= 2:
+            raise HTTPException(429, "You already have two active jobs, including investigations and further analysis.")
+        investigation_id = db.uid()
+        conn.execute("INSERT INTO investigations(id,collection_id,user_id,engine,state,created_at) VALUES(?,?,?,?,?,?)",
+                     (investigation_id, collection["id"], collection["user_id"], engine, "queued", db.now()))
+    request.app.state.investigator.enqueue(investigation_id)
+    return JSONResponse({"id": investigation_id}, status_code=202)
+
 
 async def investigation_evidence(request):
     return JSONResponse(saved_evidence(owned(request, "investigations", request.path_params["id"])))
@@ -110,8 +185,7 @@ async def incident_detail(request):
 
 async def evidence_detail(request):
     row = owned(request, "evidence", request.path_params["id"])
-    return JSONResponse({**{k: v for k, v in row.items() if k not in {"user_id", "payload"}},
-                         **json.loads(row["payload"])})
+    return JSONResponse({**db.public_evidence(row), "run_id": row["run_id"], "collection_id": row["collection_id"]})
 
 async def start_scenario(request):
     user = auth.current(request)
@@ -167,7 +241,7 @@ async def error_response(request, exc):
 @asynccontextmanager
 async def lifespan(app):
     db.init()
-    async with httpx.AsyncClient(trust_env=False) as local, httpx.AsyncClient() as provider:
+    async with httpx.AsyncClient(trust_env=False) as local, groq_http_client() as provider:
         app.state.local = local
         app.state.controller = ScenarioController(local)
         app.state.investigator = Investigator(provider)
@@ -184,6 +258,11 @@ def create_app():
         Route("/api/auth/logout", auth.logout, methods=["POST"]),
         Route("/api/auth/me", auth.me),
         Route("/api/overview", overview),
+        Route("/api/imports", import_logs, methods=["POST"]),
+        Route("/api/collections", collections),
+        Route("/api/collections/{id}", collection_detail),
+        Route("/api/collections/{id}/evidence", collection_evidence),
+        Route("/api/collections/{id}/investigations", start_collection_investigation, methods=["POST"]),
         Route("/api/runs", runs),
         Route("/api/runs/{id}", run_detail),
         Route("/api/incidents", incidents),

@@ -33,7 +33,7 @@ class EvidenceTests(unittest.TestCase):
             self.insert(conn, "bob-source", "bob", "log", "payment", "2026-11-02T00:04:10+00:00", {"trace_id": self.trace})
 
     def insert(self, conn, id, owner, kind, service, timestamp, payload):
-        conn.execute("INSERT INTO evidence VALUES(?,?,?,?,?,?,?)", (id, owner, owner, kind, service, timestamp, json.dumps(payload)))
+        conn.execute("INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)", (id, owner, owner, kind, service, timestamp, json.dumps(payload)))
 
     def test_trace_time_and_account_filters_before_limits(self):
         tools = EvidenceTools("alice", "alice", groq=True)

@@ -47,7 +47,7 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.configured.stop)
 
     def add_source(self, id, owner="alice", kind="log", service="payment", **payload):
-        db.execute("INSERT INTO evidence VALUES(?,?,?,?,?,?,?)", (id, owner, owner, kind, service,
+        db.execute("INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)", (id, owner, owner, kind, service,
                    "2026-11-02T00:00:04+00:00", json.dumps({"message": "Observed", **payload})))
 
     def add_parent(self, id, engine="groq", ids=None, report=None):
@@ -297,7 +297,7 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
         db.init()
         db.init()
         self.assertEqual(self.parent(), before)
-        self.assertEqual(db.one("SELECT MAX(version) version FROM schema_version")["version"], 2)
+        self.assertEqual(db.one("SELECT MAX(version) version FROM schema_version")["version"], 3)
         for state in ("queued", "running", "quota_waiting", "completed", "failed"):
             row = db.one("SELECT * FROM supplements WHERE id=?", (state,))
             self.assertEqual(row["state"], "interrupted" if state in ("queued", "running", "quota_waiting") else state)

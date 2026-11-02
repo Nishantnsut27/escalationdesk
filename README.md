@@ -51,11 +51,25 @@ The default **Evidence rules** engine derives findings from observed logs, timin
 
 ## POC implementation and product plan
 
-This POC uses the user-approved available stack: Python 3.14, Starlette, HTTPX, sqlite3 and React/TypeScript/Vite. The planned Python 3.13 environment could not be downloaded in this session.
+This POC uses the user-approved stack retained for the next phases: Python 3.14, Starlette, HTTPX, sqlite3 and React/TypeScript/Vite.
 
 Its connection pool holds real SQLite connections. Its trace exporter records actual operation durations and W3C parent relationships. These are lightweight POC implementations, not SQLAlchemy pooling or the OpenTelemetry SDK.
 
-The complete product requirements remain in [prd.md](prd.md). Password recovery, Jev integration, SQLAlchemy/OpenTelemetry adoption, the full 12-case evaluation, deployed sessions and hosting are not implemented in this POC. This launcher binds to loopback and is intended for local use.
+Phase 6 implements general evidence collections and pasted/file log imports; browser verification remains pending. The later roadmap adds advisory Jev triage, a read-only demo with seven saved Groq cases, Sentry imports, evaluation/password recovery, hosting and opt-in Sentry alert investigations. Gateway, Order and Payment remain reference/demo services. Those later features are not implemented yet; there is currently no shared demo login.
+
+The local planning documents are [prd.md](prd.md), [phase.md](phase.md), [status.md](status.md) and [agent.md](agent.md). They are intentionally ignored by Git and are unavailable in a fresh clone unless supplied separately. SQLAlchemy/OpenTelemetry adoption and additional connectors remain later backlog work. This launcher binds to loopback and is intended for local use.
+
+## Import your application logs
+
+Open **Imported logs**, paste text or choose a UTF-8 .log, .txt or .jsonl file, and optionally describe the symptom or provide a default service label. Choose **Save logs** to retain an owned collection. Importing makes no model request and creates no scenario run or failure incident.
+
+Limits are 1 MiB of text, 5,000 observations, 32 services and 32 KiB per observation. JSONL records can supply service, timestamp, level, message, source id and correlation IDs; plain logs and multiline exceptions are also accepted. Supplied span/metric records retain recognized fields. Missing times and relationships stay unknown. The interface discloses malformed records, redactions, duplicates and missing context.
+
+Review the retained observations before explicitly selecting **Groq**. Common credential patterns are redacted, but this is not a guarantee that arbitrary sensitive content is removed. **Evidence rules** provides an inconclusive observation summary for unfamiliar applications. Groq uses the existing bounded tools and request budgets; its citations refer only to supplied saved evidence.
+
+Raw evidence is paged and searchable separately from report sources. Identical imports return the existing collection; new investigations retain earlier attempts. Legacy scenario reports and supplements remain available. SQLite migration 3 adds collections and relaxes the required legacy run/incident links transactionally while preserving stored IDs and report fields.
+
+For browser verification, use [examples/import-check.jsonl](examples/import-check.jsonl), an artificial test fixture. Expected coverage: **4 observations, 1 duplicate skipped, 1 missing timestamp and 1 redaction**. No analysis should start automatically. Open the auth observation to inspect redaction, run Evidence rules explicitly, inspect citations, then sign out/in and revisit it. Test Groq separately only when you intend to use provider quota.
 
 ## Optional Groq setup
 
@@ -111,7 +125,7 @@ npm test
 npm run build
 ~~~
 
-Verified on 2026-11-02: 51 backend tests, 8 frontend checks, Python compilation and the production frontend build. The earlier reliability milestone passed two live original reports per failure mechanism. Live supplement flow checks also exercise quota waiting, separate usage, original preservation, duplicate submission and saved-result retrieval. Semantic source review exposed incomplete citations in early supplements; those results remain retained. See [status.md](status.md) for exact live cases and limitations.
+Verified on 2026-11-03: 68 backend tests, 10 frontend checks, Python compilation and the production frontend build. New checks cover import bounds/parsing/redaction, pagination, ownership/CSRF, duplicate/queue admission, dynamic report scope, migration preservation/rollback and explicit Groq proxy configuration. Phase 6 Groq contract tests use mocked responses; user browser verification remains pending. The earlier reliability milestone passed two live original reports per failure mechanism. Live supplement flow checks also exercise quota waiting, separate usage, original preservation, duplicate submission and saved-result retrieval. Semantic source review exposed incomplete citations in early supplements; those results remain retained. See [status.md](status.md) for exact live cases and limitations.
 
 Backend tests start a separate real four-process runtime on ports 8765-8768 with isolated storage under `.cache`. They cover authentication, CSRF, account isolation, both real failure scenarios, healthy traffic, recovery, trace/time filtering before limits, grouped evidence, request-size bounds, citation integrity, quota resumption and budgets, queue limits, restart handling and saved results. Mocked provider checks consume no Groq quota.
 
@@ -131,7 +145,7 @@ The script creates a local verification account with its password kept only in m
 
 ## Storage and files
 
-- `data/platform.sqlite3`: accounts, session digests, runs, incidents, evidence, investigations and supplements.
+- `data/platform.sqlite3`: accounts, session digests, runs, incidents, evidence collections, observations, investigations and supplements.
 - `data/payment.sqlite3`: reference-service workload.
 - `data/telemetry/`: captured JSONL service observations.
 - `data/*.log`: process diagnostics.

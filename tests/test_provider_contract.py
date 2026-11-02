@@ -159,6 +159,7 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
             await self.run_provider(respond, usage)
         self.assertEqual(usage["requests"], 2)
         self.assertNotIn("SECRET_KEY", json.dumps(usage))
+        self.assertEqual([entry["connection_error"] for entry in usage["diagnostics"]], ["connect_error", "connect_error"])
 
     async def test_permanent_errors_are_specific_and_not_retried(self):
         for status, error in [(401, "authentication"), (403, "authentication"), (413, "oversized"), (400, "schema")]:

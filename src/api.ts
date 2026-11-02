@@ -15,10 +15,11 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
 export type User = { id: string; name: string; email: string }
 export type Session = { user: User; csrf: string }
 export type Evidence = {
-  id: string; kind: 'log' | 'span' | 'metric'; service: string; timestamp: string
+  id: string; kind: 'log' | 'span' | 'metric'; service: string; timestamp: string | null
   message?: string; level?: string; name?: string; trace_id?: string; span_id?: string; parent_id?: string
   duration_ms?: number; status?: string; pool_capacity?: number; pool_in_use?: number
   started_at?: string; http_status?: number; timeout_ms?: number
+  source_line?: number; source_id?: string; original?: string; request_id?: string
   requests?: number; failures?: number; last_latency_ms?: number
   [key: string]: unknown
 }
@@ -63,4 +64,14 @@ export type Overview = {
   counts: { requests: number; failures: number; incidents: number; evidence: number; total: number }
   providers: { groq: boolean; jev: boolean }; runtime_busy: boolean
 }
+
+
+export type Collection = {
+  id: string; title: string; symptom: string; filename: string | null; source_type: 'file' | 'paste'; created_at: string
+  summary: { observations: number; input_bytes: number; input_lines: number; duplicates: number; conflicting_ids: number
+    malformed_records: number; redactions: number; missing_timestamps: number; missing_services: number; invalid_fields: number
+    services: string[]; kinds: string[]; coverage: string; redaction_note: string }
+}
+export type CollectionDetail = { collection: Collection; investigations: Investigation[] }
+export type EvidencePage = { collection_id: string; evidence: Evidence[]; next_offset: number | null }
 

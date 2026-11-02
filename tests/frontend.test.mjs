@@ -140,3 +140,36 @@ test('API client rejects non-success responses and sends CSRF on writes', async 
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('import form and coverage make explicit analysis and missing context clear', async () => {
+  const { ImportForm, ImportCoverage } = await components('src/imports.tsx')
+  const form = renderToStaticMarkup(createElement(ImportForm, { onImported() {}, onError() {} }))
+  assert.match(form, /Save logs/)
+  assert.match(form, /Importing does not start analysis/)
+  assert.match(form, /\.log,\.txt,\.jsonl/)
+  assert.match(form, /Default service/)
+  assert.match(form, /1 MiB/)
+  const collection = { id: 'collection', title: 'Application logs', created_at: '2026-11-03T00:00:00Z', source_type: 'paste', filename: null, symptom: '500 errors',
+    summary: { observations: 3, input_lines: 5, duplicates: 1, conflicting_ids: 1, malformed_records: 1, redactions: 2, missing_timestamps: 1, missing_services: 1,
+      invalid_fields: 0, kinds: ['log'], services: ['billing'], coverage: 'Only supplied text.', redaction_note: 'Review saved content.' } }
+  const coverage = renderToStaticMarkup(createElement(ImportCoverage, { collection }))
+  assert.match(coverage, /not a telemetry timestamp/)
+  assert.match(coverage, /Conflicting IDs retained/)
+  assert.match(coverage, /Malformed records kept as text/)
+  assert.match(coverage, /Missing\/invalid timestamps/)
+  assert.match(coverage, /Metrics and traces are unavailable unless supplied/)
+})
+
+test('imported service maps and timelines do not invent topology, reachability or timestamps', async () => {
+  const { ServiceMap } = await components('src/App.tsx')
+  const html = renderToStaticMarkup(createElement(ServiceMap, { overview: null, services: ['billing', 'catalog'], evidence: [] }))
+  assert.match(html, /billing/)
+  assert.match(html, /not measured for imported logs/)
+  assert.doesNotMatch(html, /gateway|payment|class="connector"/)
+  const { orderedEvidence, FullTime } = await components('src/reports.tsx')
+  const rows = [{ id: 'untimed-last', kind: 'log', timestamp: null, source_line: 6 },
+    { id: 'dated', kind: 'log', timestamp: '2026-11-03T00:00:00Z', source_line: 5 },
+    { id: 'untimed-first', kind: 'log', timestamp: null, source_line: 2 }]
+  assert.deepEqual(orderedEvidence(rows).map(row => row.id), ['dated', 'untimed-first', 'untimed-last'])
+  assert.match(renderToStaticMarkup(createElement(FullTime, { value: null })), /Timestamp not recorded/)
+})
+

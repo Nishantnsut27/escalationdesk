@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, setCsrf, type Detail, type Evidence, type Incident, type Investigation,
   type Overview, type Run, type Session, type User, type Report, type ReportEvidence } from './api'
+import { ImportWorkspace } from './imports'
 import { Citations, EvidenceTimeline, FullTime, ObservationFields, SupplementPanel, useReportEvidence } from './reports'
 
 const scenarioNames: Record<string, string> = { pool: 'Connection pool exhaustion', slow: 'Slow Payment processing', healthy: 'Healthy checkout' }
@@ -65,27 +66,27 @@ function Auth({ onSession }: { onSession: (session: Session) => void }) {
   </div>
 }
 
-export function ServiceMap({ overview, evidence, report, evidenceReady = true }: { overview: Overview | null; evidence: Evidence[]; report?: Report | null; evidenceReady?: boolean }) {
+export function ServiceMap({ overview, evidence, report, evidenceReady = true, services }: { overview: Overview | null; evidence: Evidence[]; report?: Report | null; evidenceReady?: boolean; services?: string[] }) {
   return <div className="service-map">
-    {['gateway', 'order', 'payment'].map((service, i) => {
+    {(services || ['gateway', 'order', 'payment']).map((service, i) => {
       const errors = evidence.filter(row => row.service === service && (row.status === 'error' || row.level === 'error' || (row.http_status ?? 0) >= 400)).length
       const up = overview?.services.find(item => item.name === service)?.status === 'healthy'
       return <div className="service-node-wrap" key={service}>
         <div className="service-node"><span className={'node-icon ' + (errors ? 'node-error' : '')}>{service === 'payment' ? <Database size={20} /> : <Server size={20} />}</span>
           <div><strong>{service}</strong>{report && <><span>Reported origin: {report.origin === service ? report.assessment === 'inconclusive' ? 'proposed; inconclusive' : 'yes' : 'not identified here'}</span><span>Reported affected: {report.affected_services.includes(service) ? 'yes' : 'not listed'}</span></>}
-            <span>Observed errors: {evidenceReady ? `${errors}${!errors ? ' in this evidence scope' : ''}` : 'evidence not loaded'}</span><span>Current reachability: {up ? 'reachable' : 'unavailable'}</span></div>
+            <span>Observed errors: {evidenceReady ? `${errors}${!errors ? ' in this evidence scope' : ''}` : 'evidence not loaded'}</span><span>Current reachability: {services ? 'not measured for imported logs' : up ? 'reachable' : 'unavailable'}</span></div>
           <span className={'service-dot ' + (up ? 'up' : '')} aria-hidden="true" />
-        </div>{i < 2 && <ArrowRight className="connector" size={18} />}
+        </div>{!services && i < 2 && <ArrowRight className="connector" size={18} />}
       </div>
     })}
   </div>
 }
 
-function EvidenceTable({ evidence, kind, onOpen }: { evidence: Evidence[]; kind: string; onOpen: (id: string) => void }) {
+export function EvidenceTable({ evidence, kind, onOpen, note }: { evidence: Evidence[]; kind: string; onOpen: (id: string) => void; note?: string }) {
   const [query, setQuery] = useState('')
   const rows = evidence.filter(row => row.kind === kind && (!query || JSON.stringify(row).toLowerCase().includes(query.toLowerCase())))
   return <div className="evidence-section">
-    <p className="raw-evidence-note">Raw run evidence · Up to 200 observations across all types. This view may include sources not used by the selected report.</p>
+    <p className="raw-evidence-note">{note || "Raw run evidence · Up to 200 observations across all types. This view may include sources not used by the selected report."}</p>
     <div className="evidence-toolbar"><span>{rows.length} {kind === 'span' ? 'measured spans' : kind === 'metric' ? 'metric samples' : 'log entries'}</span><label className="search"><Search size={15} /><input aria-label="Filter evidence" placeholder="Filter evidence…" value={query} onChange={e => setQuery(e.target.value)} /></label></div>
     {rows.length ? <div className="table-scroll"><table><thead><tr><th>Time</th><th>Service</th><th>{kind === 'span' ? 'Operation' : kind === 'metric' ? 'Observation' : 'Message'}</th><th>Source</th></tr></thead>
       <tbody>{rows.map(row => <tr key={row.id}><td className="mono"><FullTime value={row.timestamp} /></td><td><span className="service-label">{row.service}</span></td>
@@ -268,19 +269,20 @@ export default function App() {
       <div className="workspace-switch"><span className="workspace-icon"><Layers3 size={18} /></span><div><strong>Personal workspace</strong><span>Local environment</span></div><LockKeyhole size={13} /></div>
       <span className="nav-label">WORKSPACE</span>
       <nav>
-        {[{ key: 'overview', label: 'Overview', icon: Layers3 }, { key: 'investigations', label: 'Investigations', icon: Fingerprint }, { key: 'evidence', label: 'Evidence explorer', icon: FileText }, { key: 'map', label: 'Service map', icon: GitBranch }].map(({ key, label, icon: Icon }) => <button key={key} className={nav === key ? 'active' : ''} onClick={() => navigate(key)}><Icon size={18} />{label}{key === 'overview' && <span className="nav-count">{incidents.length}</span>}</button>)}
+        {[{ key: 'overview', label: 'Overview', icon: Layers3 }, { key: 'imports', label: 'Imported logs', icon: FileText }, { key: 'investigations', label: 'Investigations', icon: Fingerprint }, { key: 'evidence', label: 'Evidence explorer', icon: FileText }, { key: 'map', label: 'Service map', icon: GitBranch }].map(({ key, label, icon: Icon }) => <button key={key} className={nav === key ? 'active' : ''} onClick={() => navigate(key)}><Icon size={18} />{label}{key === 'overview' && <span className="nav-count">{incidents.length}</span>}</button>)}
       </nav>
       <div className="sidebar-runtime"><span className="nav-label">RUNTIME</span>{overview?.services.map(service => <div key={service.name}><span className={'service-dot ' + (service.status === 'healthy' ? 'up' : '')} />{service.name}<span>{service.status === 'healthy' ? 'Online' : 'Offline'}</span></div>)}</div>
-      <div className="sidebar-bottom"><div className="local-card"><Radio size={18} /><div><strong>Connected locally</strong><p>Evidence stays on this machine.</p></div></div><div className="user-row"><span className="avatar">{user.name.charAt(0).toUpperCase()}</span><div><strong>{user.name}</strong><span>{user.email}</span></div><button onClick={logout} title="Sign out" aria-label="Sign out"><LogOut size={17} /></button></div></div>
+      <div className="sidebar-bottom"><div className="local-card"><Radio size={18} /><div><strong>Connected locally</strong><p>Saved locally. Groq uses selected evidence.</p></div></div><div className="user-row"><span className="avatar">{user.name.charAt(0).toUpperCase()}</span><div><strong>{user.name}</strong><span>{user.email}</span></div><button onClick={logout} title="Sign out" aria-label="Sign out"><LogOut size={17} /></button></div></div>
     </aside>
 
     <div className="main-shell">
-      <header className="topbar"><div><span>Workspace</span><ChevronRight size={13} /><strong>{nav === 'overview' ? 'Overview' : nav === 'investigations' ? 'Investigations' : nav === 'evidence' ? 'Evidence explorer' : 'Service map'}</strong></div><span className={'connection-pill ' + (!allServicesUp ? 'offline' : '')}><i />{allServicesUp ? 'All services connected' : 'Checking service connections'}</span></header>
+      <header className="topbar"><div><span>Workspace</span><ChevronRight size={13} /><strong>{nav === 'imports' ? 'Imported logs' : nav === 'overview' ? 'Overview' : nav === 'investigations' ? 'Investigations' : nav === 'evidence' ? 'Evidence explorer' : 'Service map'}</strong></div><span className={'connection-pill ' + (!allServicesUp ? 'offline' : '')}><i />{allServicesUp ? 'All services connected' : 'Checking service connections'}</span></header>
       <main>
-        <div className="page-heading"><div><span className="eyebrow">OBSERVE. INVESTIGATE. UNDERSTAND.</span><h1>{nav === 'overview' ? 'Incident overview' : nav === 'investigations' ? 'Your investigations' : nav === 'evidence' ? 'Evidence explorer' : 'Connected services'}</h1><p>A connected view of your services, failures and the evidence behind them.</p></div><span className="date-label">{new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
+        <div className="page-heading"><div><span className="eyebrow">OBSERVE. INVESTIGATE. UNDERSTAND.</span><h1>{nav === 'imports' ? 'Investigate your application logs' : nav === 'overview' ? 'Incident overview' : nav === 'investigations' ? 'Your investigations' : nav === 'evidence' ? 'Evidence explorer' : 'Connected services'}</h1><p>A connected view of your services, failures and the evidence behind them.</p></div><span className="date-label">{new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
 
         {error && <div className="error-banner global-error" role="alert"><TriangleAlert size={17} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
 
+        {nav === 'imports' ? <ImportWorkspace key={user.id} overview={overview} onOpen={openEvidence} onError={failure} ReportComponent={ReportView} MapComponent={ServiceMap} TableComponent={EvidenceTable} /> : <>
         <section className="scenario-panel">
           <div className="scenario-copy"><span className="scenario-icon"><Activity size={23} /></span><div><span className="eyebrow mint">LIVE SERVICE SCENARIOS</span><h2>See what happens when a service fails.</h2><p>Three real requests. Captured evidence. Automatic recovery.</p></div></div>
           <div className="scenario-controls"><label className="sr-only" htmlFor="scenario">Failure scenario</label><select id="scenario" value={scenario} onChange={e => setScenario(e.target.value)} disabled={!!busy || overview?.runtime_busy}><option value="pool">Connection pool exhaustion</option><option value="slow">Slow Payment processing</option><option value="healthy">Healthy checkout</option></select><button className="button mint-button" disabled={!!busy || overview?.runtime_busy || !allServicesUp} onClick={startScenario}>{busy === 'scenario' ? <Spinner /> : <Play size={15} fill="currentColor" />}Run scenario</button></div>
@@ -325,10 +327,11 @@ export default function App() {
             </> : <div className="workspace-empty"><div className="empty-orbit"><Search size={29} /><span><FileText size={14} /></span></div><h3>Your workspace is ready.</h3><p>Start a service scenario above. We'll capture the requests,<br />connect the symptoms and keep the evidence in one place.</p><div className="empty-steps"><span><b>01</b> Run scenario</span><ArrowRight size={13} /><span><b>02</b> Inspect evidence</span><ArrowRight size={13} /><span><b>03</b> Investigate</span></div></div>}
           </section>
         </div>
+        </>}
         <footer className="page-footer"><span><ShieldCheck size={13} />Account-scoped evidence · Stored locally</span><span>Escalation Desk <span className="footer-slash">/</span> Proof of concept</span></footer>
       </main>
     </div>
-    {openedEvidence && <div className="modal-backdrop" onClick={() => setOpenedEvidence(null)}><section className="evidence-modal" role="dialog" aria-modal="true" aria-labelledby="evidence-title" onClick={e => e.stopPropagation()}><header><div><span className="tiny-label">RECORDED SOURCE OBSERVATION</span><h2 id="evidence-title">Evidence {shortId(openedEvidence.id)}</h2></div><button ref={modalClose} aria-label="Close evidence" onClick={() => setOpenedEvidence(null)}><X size={20} /></button></header><div className="modal-meta"><span className="service-label">{openedEvidence.service}</span><span>{openedEvidence.kind}</span><FullTime value={openedEvidence.timestamp} /></div><div className="modal-body"><ObservationFields row={openedEvidence} /><details><summary>Original recorded JSON</summary><pre>{JSON.stringify(openedEvidence, null, 2)}</pre></details></div><footer><LockKeyhole size={13} />Stored observation from your service run.</footer></section></div>}
+    {openedEvidence && <div className="modal-backdrop" onClick={() => setOpenedEvidence(null)}><section className="evidence-modal" role="dialog" aria-modal="true" aria-labelledby="evidence-title" onClick={e => e.stopPropagation()}><header><div><span className="tiny-label">RECORDED SOURCE OBSERVATION</span><h2 id="evidence-title">Evidence {shortId(openedEvidence.id)}</h2></div><button ref={modalClose} aria-label="Close evidence" onClick={() => setOpenedEvidence(null)}><X size={20} /></button></header><div className="modal-meta"><span className="service-label">{openedEvidence.service}</span><span>{openedEvidence.kind}</span><FullTime value={openedEvidence.timestamp} /></div><div className="modal-body"><ObservationFields row={openedEvidence} />{openedEvidence.original && <details><summary>Original imported content (redacted)</summary><pre>{openedEvidence.original}</pre></details>}<details><summary>Original recorded JSON</summary><pre>{JSON.stringify(openedEvidence, null, 2)}</pre></details></div><footer><LockKeyhole size={13} />Stored observation in your evidence run.</footer></section></div>}
   </div>
 }
 

@@ -62,3 +62,30 @@
 .detail-tabs button { white-space: nowrap; }
 button:focus-visible,summary:focus-visible,select:focus-visible { outline: 2px solid #396649; outline-offset: 3px; }
 @media(max-width:760px) { .supplement-result { padding: 13px; } .history-picker { flex-wrap: wrap; } .observation-fields>div { grid-template-columns: 1fr; gap: 2px; } .modal-body { padding-inline: 18px; } }
+.import-panel { background: #fff; border: 1px solid #dfe6d9; border-radius: 10px; margin-bottom: 24px; }
+.import-panel form { padding: 20px 24px; display: grid; gap: 14px; }
+.import-panel label,.collection-search { display: grid; gap: 7px; font-size: 12px; color: #53664f; }
+.import-panel input,.import-panel textarea,.collection-search input { width: 100%; border: 1px solid #d8e0d2; border-radius: 6px; padding: 10px; background: #fbfcf8; color: #304d38; font: inherit; box-sizing: border-box; }
+.import-panel textarea { resize: vertical; line-height: 1.7; font-family: Consolas, monospace; }
+.import-panel input[type=file] { padding: 8px; }
+.import-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.import-panel .button { justify-self: start; }
+.import-error { color: #9d3c29; margin: 12px 24px; overflow-wrap: anywhere; font-size: 13px; }
+.import-coverage { padding: 20px 24px; border-bottom: 1px solid #e5ebe0; }
+.import-coverage h3 { font-size: 17px; margin: 0 0 12px; overflow-wrap: anywhere; }
+.import-coverage p,.import-guidance { font-size: 12px; line-height: 1.8; color: #677764; overflow-wrap: anywhere; }
+.import-guidance { padding: 0 24px; }
+.import-coverage dl { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; margin: 18px 0; }
+.import-coverage dt { font-size: 11px; color: #77876a; }
+.import-coverage dd { margin: 5px 0 0; font-size: 18px; color: #3f5944; }
+.import-detail { min-width: 0; }
+.import-detail .service-map { flex-wrap: wrap; gap: 12px; }
+.import-detail .service-node-wrap { flex: 1 1 190px; min-width: 0; }
+.import-detail .service-node { width: 100%; min-width: 0; }
+.import-detail .service-node strong { overflow-wrap: anywhere; }
+.collection-search { margin: 16px 24px; }
+.load-more { margin: 12px 24px 22px; }
+.imports-workspace .incident-item time { font-size: 10px; overflow-wrap: anywhere; }
+.imports-workspace .incident-item p { font-size: 12px; color: #677764; }
+.imports-workspace .incident-item h3 { overflow-wrap: anywhere; }
+@media(max-width:760px) { .import-fields { grid-template-columns: 1fr; } .import-coverage dl { grid-template-columns: repeat(2,minmax(0,1fr)); } .import-panel form,.import-coverage { padding: 16px; } .import-detail .detail-heading { flex-direction: column; gap: 12px; align-items: flex-start; } .import-detail .investigate-controls { flex-wrap: wrap; } }

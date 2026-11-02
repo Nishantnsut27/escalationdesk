@@ -32,7 +32,7 @@ class ScenarioController:
                             continue
                         payload = {key: value for key, value in event.items()
                                    if key not in {"id", "run_id", "service", "kind", "timestamp"}}
-                        conn.execute("INSERT OR IGNORE INTO evidence VALUES(?,?,?,?,?,?,?)",
+                        conn.execute("INSERT OR IGNORE INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)",
                                      (event["id"], run_id, owner, event["kind"], event["service"],
                                       event["timestamp"], json.dumps(payload)))
 
@@ -46,7 +46,7 @@ class ScenarioController:
                 continue
             for key in ("requests", "failures", "acquisition_failures"):
                 metric[key] = metric.get(key, 0) - baseline[name].get(key, 0)
-            db.execute("INSERT INTO evidence VALUES(?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)",
                        (db.uid(), run_id, owner, "metric", name, db.now(), json.dumps(metric)))
 
     async def start(self, owner, scenario):

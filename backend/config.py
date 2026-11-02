@@ -16,6 +16,7 @@ ORIGINS = {f"http://127.0.0.1:{PORT}", "http://127.0.0.1:5173",
            f"http://localhost:{PORT}", "http://localhost:5173"}
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_PROXY_URL = os.getenv("GROQ_PROXY_URL", "").strip()
 SERVICES = {"gateway": PORT + 1, "order": PORT + 2, "payment": PORT + 3}
 
 def service_url(name):

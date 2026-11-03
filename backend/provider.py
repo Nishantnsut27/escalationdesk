@@ -1,6 +1,6 @@
 """Use explicit application proxy settings, not the launching shell's proxies."""
 import httpx
-from .config import GROQ_PROXY_URL
+from .config import GROQ_PROXY_URL, JEV_PROXY_URL
 
 
 def groq_http_client():
@@ -8,6 +8,13 @@ def groq_http_client():
         return httpx.AsyncClient(trust_env=False, proxy=GROQ_PROXY_URL or None, verify=True)
     except (ValueError, httpx.InvalidURL):
         raise ValueError("Invalid GROQ_PROXY_URL. Use an HTTP or HTTPS proxy URL, or leave it empty for a direct connection.") from None
+
+
+def jev_http_client():
+    try:
+        return httpx.AsyncClient(trust_env=False, proxy=JEV_PROXY_URL or None, verify=True)
+    except (ValueError, httpx.InvalidURL):
+        raise ValueError("Invalid JEV_PROXY_URL. Use an HTTP or HTTPS proxy URL, or leave it empty for a direct connection.") from None
 
 
 def connection_failure_kind(error):

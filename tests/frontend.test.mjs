@@ -18,10 +18,52 @@ const reportFixture = { assessment: 'inconclusive', origin: 'payment', summary: 
   hypotheses: [{ claim: 'Processing may be delayed.', evidence_ids: ['source-b'] }], recommendations: ['Inspect linked spans.'], limitations: ['Deeper cause unknown.'] }
 const investigationFixture = { id: 'saved', engine: 'groq', state: 'completed', created_at: '2026-11-02T00:00:05Z', completed_at: '2026-11-02T00:00:09Z', report: reportFixture, activity: [], usage: { requests: 2, total_tokens: 200 }, supplements: [] }
 
+test('Jev triage stays advisory and separate from the assessed cause and Groq usage', async () => {
+  const { ReportView } = await components('src/App.tsx')
+  const triage = { requested: true, state: 'completed', category: 'resource_exhaustion', confidence: .6,
+    probabilities: { resource_exhaustion: .7, latency_timeout: .3 }, requests: 1,
+    returned_model: 'typesafe/jev-1.14', actual_usage: { input_tokens: 123, output_tokens: 45 },
+    groups: [{ id: 'g0', source_ids: ['source-a'], score: 1.5 }] }
+  const investigation = { ...investigationFixture, usage: { ...investigationFixture.usage, triage } }
+  const html = renderToStaticMarkup(createElement(ReportView, { investigation, onOpen() {} }))
+  assert.match(html, /Possible cause — limited evidence/)
+  assert.match(html, /Initial triage · Resource exhaustion/)
+  assert.match(html, /not a root-cause finding/)
+  assert.match(html, /Groq can disagree/)
+  assert.match(html, /Input tokens: 123/)
+  assert.match(html, /Original usage: 2 HTTP attempts/)
+  assert.match(html, /Priority 1.50 \/ 2/)
+  assert.doesNotMatch(html, /Initial triage[^>]*open=/)
+})
+
+test('triage pending, fallback, unknown and missing usage have truthful display', async () => {
+  const { TriagePanel, WorkflowLabel } = await components('src/triage.tsx')
+  for (const state of ['pending', 'running', 'fallback', 'interrupted']) {
+    const html = renderToStaticMarkup(createElement(TriagePanel, { triage: { requested: true, state, reason: 'Provider unavailable' }, onOpen() {} }))
+    assert.match(html, state === 'fallback' ? /Groq-only fallback/ : /Initial triage/)
+    assert.doesNotMatch(html, /Assessed cause/)
+  }
+  const html = renderToStaticMarkup(createElement(TriagePanel, { triage: { requested: true, state: 'completed', category: 'no_clear_failure', probabilities: {}, groups: [] }, onOpen() {} }))
+  assert.match(html, /does not establish application health/)
+  assert.match(html, /Input tokens: not returned/)
+  assert.match(renderToStaticMarkup(createElement(WorkflowLabel, { providers: { groq: false, jev: true } })), /Full investigation unavailable/)
+  assert.match(renderToStaticMarkup(createElement(WorkflowLabel, { providers: { groq: true, jev: true } })), /Jev triage → Groq investigation/)
+})
+
+test('source previews show actual observations, missing timestamps and unavailable sources', async () => {
+  const { SourcePreviews } = await components('src/triage.tsx')
+  const scope = { evidence: [{ id: 'a', service: 'catalog', kind: 'log', message: 'Actual TypeError', timestamp: null }] }
+  const html = renderToStaticMarkup(createElement(SourcePreviews, { ids: ['a', 'a', 'missing'], scope, onOpen() {} }))
+  assert.match(html, /Actual TypeError/)
+  assert.match(html, /Timestamp not recorded/)
+  assert.match(html, /Saved source unavailable/)
+  assert.equal((html.match(/Open evidence a/g) || []).length, 1)
+})
+
 test('saved reports expose individual hypotheses, neutral assessment, timeline and explicit further analysis', async () => {
   const { ReportView } = await components('src/App.tsx')
   const html = renderToStaticMarkup(createElement(ReportView, { investigation: investigationFixture, onOpen() {} }))
-  assert.match(html, /The assessment is inconclusive/)
+  assert.match(html, /Possible cause — limited evidence/)
   assert.doesNotMatch(html, /failure originates/)
   assert.match(html, /Processing may be delayed/)
   assert.match(html, /Open evidence source-b/)

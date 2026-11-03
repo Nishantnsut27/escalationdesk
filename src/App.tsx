@@ -7,6 +7,7 @@ import {
 import { api, ApiError, setCsrf, type Detail, type Evidence, type Incident, type Investigation,
   type Overview, type Run, type Session, type User, type Report, type ReportEvidence } from './api'
 import { ImportWorkspace } from './imports'
+import { SourcePreviews, TriagePanel, WorkflowLabel } from './triage'
 import { Citations, EvidenceTimeline, FullTime, ObservationFields, SupplementPanel, useReportEvidence } from './reports'
 
 const scenarioNames: Record<string, string> = { pool: 'Connection pool exhaustion', slow: 'Slow Payment processing', healthy: 'Healthy checkout' }
@@ -116,21 +117,24 @@ export function ReportView({ investigation, onOpen, scope = null, evidenceError,
     const queued = investigation.state === 'queued'
     const reporting = investigation.usage.progress === 'reporting'
     const seconds = investigation.usage.retry_at ? Math.max(0, Math.ceil((Date.parse(investigation.usage.retry_at) - clock) / 1000)) : null
-    const heading = waiting ? 'Waiting for Groq quota' : queued ? 'Investigation queued' : reporting ? 'Writing the assessment' : 'Reviewing the evidence'
-    const description = waiting ? investigation.usage.wait_reason : queued ? 'Your investigation will start automatically.' : reporting ? 'Preparing the report from the collected evidence.' : 'Reviewing logs, metrics and traces for this incident.'
+    const triaging = investigation.usage.progress === 'triaging'
+    const heading = waiting ? 'Waiting for Groq quota' : queued ? 'Investigation queued' : triaging ? 'Initial triage' : reporting ? 'Writing the assessment' : 'Investigating evidence'
+    const description = waiting ? investigation.usage.wait_reason : queued ? 'Your investigation will start automatically.' : triaging ? 'Jev is classifying the observations and their diagnostic usefulness.' : reporting ? 'Preparing the report from the collected evidence.' : 'Reviewing logs, metrics and traces for this incident.'
     return <><div className="report-empty report-progress" role="status">
       <div className="progress-indicator"><Spinner /><StateBadge state={investigation.state} /></div>
       <h3>{heading}</h3><p>{description}</p>
       {waiting && <p>{seconds !== null ? `Resuming in ${seconds}s · Expected retry ${time(investigation.usage.retry_at!)}` : 'Waiting for provider retry timing.'}<br />Collected evidence is preserved. This investigation resumes automatically.</p>}
-    </div><InvestigationActivity investigation={investigation} onOpen={onOpen} /></>
+    </div><TriagePanel triage={investigation.usage.triage} onOpen={onOpen} /><InvestigationActivity investigation={investigation} onOpen={onOpen} /></>
   }
-  if (!investigation.report) return <><div className="report-empty" role="alert"><TriangleAlert size={28} /><h3>Investigation {investigation.state}</h3><p>{investigation.error || 'Start a new investigation to try again.'}</p><p>Retry creates a new investigation and keeps this attempt in saved history.</p></div><InvestigationActivity investigation={investigation} onOpen={onOpen} /></>
+  if (!investigation.report) return <><div className="report-empty" role="alert"><TriangleAlert size={28} /><h3>Investigation {investigation.state}</h3><p>{investigation.error || 'Start a new investigation to try again.'}</p><p>Retry creates a new investigation and keeps this attempt in saved history.</p></div><TriagePanel triage={investigation.usage.triage} onOpen={onOpen} /><InvestigationActivity investigation={investigation} onOpen={onOpen} /></>
   const report = investigation.report
   return <div className="report-content">
     <div className="report-meta"><span className="eyebrow"><Fingerprint size={14} /> {investigation.engine === 'rules' ? 'RECORDED EVIDENCE RULES ANALYSIS' : 'RECORDED GROQ INVESTIGATION'}</span><StateBadge state={report.assessment} /></div>
-    <h3>{report.assessment === 'inconclusive' || report.origin === 'unknown' ? 'The assessment is inconclusive.' : 'Reported origin: ' + report.origin.charAt(0).toUpperCase() + report.origin.slice(1) + '.'}</h3>
+    <h3>{report.origin === 'unknown' ? 'Cause not established' : report.assessment === 'inconclusive' ? 'Possible cause — limited evidence' : 'Assessed cause — supported by evidence'}</h3>
+    {report.origin !== 'unknown' && <p className="assessment-origin">Reported origin: <strong>{report.origin}</strong></p>}
     <p className="report-summary">{report.summary}</p>
-    <div className="evidence-citations"><span>Supporting evidence</span>{report.evidence_ids.map(id => <button onClick={() => onOpen(id)} key={id}><FileText size={12} />{shortId(id)}<ArrowUpRight size={12} /></button>)}</div>
+    <SourcePreviews ids={report.evidence_ids} scope={scope} error={evidenceError} onOpen={onOpen} />
+    <TriagePanel triage={investigation.usage.triage} onOpen={onOpen} />
     <section className="report-hypotheses"><h4>Reported hypotheses</h4>{report.hypotheses.length ? report.hypotheses.map((item, index) => <div key={index}><p>{item.claim}</p><Citations ids={item.evidence_ids} onOpen={onOpen} /></div>) : <p>No hypotheses recorded.</p>}</section>
     <div className="recommendations"><span className="tiny-label">RECOMMENDED NEXT STEPS</span>{report.recommendations.map((text, i) => <div key={text}><span className="step-number">{String(i + 1).padStart(2, '0')}</span><p>{text}</p></div>)}</div>
     <div className="limitation"><CircleDot size={17} /><div><strong>What the evidence does not establish</strong>{report.limitations.map(item => <p key={item}>{item}</p>)}</div></div>
@@ -154,7 +158,6 @@ export default function App() {
   const [tab, setTab] = useState('assessment')
   const [nav, setNav] = useState('overview')
   const [scenario, setScenario] = useState('pool')
-  const [engine, setEngine] = useState('rules')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [openedEvidence, setOpenedEvidence] = useState<Evidence | null>(null)
@@ -242,7 +245,7 @@ export default function App() {
     if (!selected) return
     setBusy('investigate'); setError(''); setHistoryId(''); setTab('assessment'); setSelectedRun('')
     try {
-      await api('/incidents/' + selected + '/investigations', { engine })
+      await api('/incidents/' + selected + '/investigations', { engine: 'groq', triage: true })
       setDetail(await api<Detail>('/incidents/' + selected))
     } catch (e) { failure(e) } finally { setBusy('') }
   }
@@ -316,7 +319,7 @@ export default function App() {
 
           <section className="detail-panel">
             <div className="detail-heading"><div><span className="tiny-label">{selectedRun ? 'RUN-' + shortId(selectedRun) : selected ? 'INC-' + shortId(selected) : 'INVESTIGATION WORKSPACE'}</span><h2>{selectedRun ? scenarioNames[runs.find(run => run.id === selectedRun)?.scenario || 'healthy'] : selected ? 'From signals to a clear assessment.' : 'Every incident has a story.'}</h2></div>
-              {selected && !selectedRun && <div className="investigate-controls"><label className="sr-only" htmlFor="engine">Investigation engine</label><select id="engine" value={engine} onChange={e => setEngine(e.target.value)}><option value="rules">Evidence rules</option><option value="groq" disabled={!overview?.providers.groq}>Groq{!overview?.providers.groq ? ' · not configured' : ''}</option></select><button className="button primary" onClick={investigate} disabled={!!busy || investigating || activeStates.includes(selectedIncidentRun?.state || '')}>{investigating || busy === 'investigate' ? <Spinner /> : <Fingerprint size={15} />}{investigating ? 'Investigating' : investigation && ['failed', 'interrupted'].includes(investigation.state) ? 'Retry investigation' : 'Investigate'}</button></div>}
+              {selected && !selectedRun && <div className="investigate-controls"><WorkflowLabel providers={overview?.providers} /><button className="button primary" onClick={investigate} disabled={!overview?.providers.groq || !!busy || investigating || activeStates.includes(selectedIncidentRun?.state || '')}>{investigating || busy === 'investigate' ? <Spinner /> : <Fingerprint size={15} />}{investigating ? 'Investigating' : investigation && ['failed', 'interrupted'].includes(investigation.state) ? 'Retry investigation' : 'Investigate'}</button></div>}
             </div>
             {(selected || runs.length > 0) ? <>
               <div className="detail-tabs">{(selectedRun || !selected ? [{ key: 'log', name: 'Logs' }, { key: 'span', name: 'Traces' }, { key: 'metric', name: 'Metrics' }] : [{ key: 'assessment', name: 'Assessment' }, { key: 'log', name: 'Logs' }, { key: 'span', name: 'Traces' }, { key: 'metric', name: 'Metrics' }]).map(item => <button className={tab === item.key ? 'active' : ''} key={item.key} onClick={() => setTab(item.key)}>{item.name}{item.key !== 'assessment' && <span>{evidence.filter(row => row.kind === item.key).length}</span>}</button>)}</div>

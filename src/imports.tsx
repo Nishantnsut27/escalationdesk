@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { FileText, Fingerprint, LoaderCircle, Upload } from 'lucide-react'
 import { api, ApiError, type Collection, type CollectionDetail, type EvidencePage, type Overview } from './api'
 import { FullTime, useReportEvidence } from './reports'
+import { WorkflowLabel } from './triage'
 import type { ReportView, ServiceMap, EvidenceTable } from './App'
 
 const active = ['queued', 'running', 'quota_waiting']
@@ -54,7 +55,7 @@ export function ImportForm({ onImported, onError }: { onImported: (value: Collec
       <label>Log file (optional)<input type="file" accept=".log,.txt,.jsonl" disabled={busy} onChange={e => void chooseFile(e.target.files?.[0])} /></label>
       <label>Log content<textarea value={content} onChange={e => { fileRead.current++; setContent(e.target.value) }} placeholder="Paste JSONL, plain logs or a multiline exception..." rows={7} required disabled={busy} spellCheck={false} /></label>
       <label>What did you observe? (optional)<textarea value={symptom} onChange={e => setSymptom(e.target.value)} maxLength={2000} rows={2} placeholder="For example: sign-in requests started returning 500." disabled={busy} /></label>
-      <p className="report-note">Up to 1 MiB, 5,000 observations and 32 services per import. UTF-8 text only. Common credentials are redacted; review saved content before choosing Groq. Importing does not start analysis.</p>
+      <p className="report-note">Up to 1 MiB, 5,000 observations and 32 services per import. UTF-8 text only. Common credentials are redacted; review saved content before investigating with Jev and Groq. Importing does not start analysis.</p>
       {error && <p className="import-error" role="alert">{error}</p>}
       <button className="button primary" disabled={busy || !content.trim()}>{busy ? <LoaderCircle size={16} className="spin" /> : <Upload size={16} />}{busy ? 'Importing...' : 'Save logs'}</button>
     </form>
@@ -87,7 +88,6 @@ function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapCom
   const [detail, setDetail] = useState<CollectionDetail | null>(null)
   const [historyId, setHistoryId] = useState('')
   const [tab, setTab] = useState('assessment')
-  const [engine, setEngine] = useState('rules')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [query, setQuery] = useState('')
@@ -124,7 +124,7 @@ function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapCom
   async function investigate() {
     setBusy(true); setError('')
     try {
-      const started = await api<{ id: string }>('/collections/' + id + '/investigations', { engine })
+      const started = await api<{ id: string }>('/collections/' + id + '/investigations', { engine: 'groq', triage: true })
       const updated = await api<CollectionDetail>('/collections/' + id)
       if (mounted.current) { setDetail(updated); setHistoryId(started.id); setTab('assessment') }
     } catch (e) { if (mounted.current) { setError(e instanceof Error ? e.message : 'Unable to investigate.'); if (e instanceof ApiError && e.status === 401) onError(e) } }
@@ -136,12 +136,10 @@ function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapCom
     <div className="section-heading"><h2>Services in this collection</h2><span>No live reachability or configured links supplied</span></div>
     <MapComponent overview={null} services={detail.collection.summary.services} evidence={scope?.evidence || []} report={investigation?.report} evidenceReady={!!scope} />
     <div className="detail-heading"><h2>Review the evidence</h2><div className="investigate-controls">
-      <label className="sr-only" htmlFor="import-engine">Imported-log investigation engine</label>
-      <select id="import-engine" value={engine} onChange={e => setEngine(e.target.value)} disabled={busy || investigating}>
-        <option value="rules">Evidence rules (summary only)</option><option value="groq" disabled={!overview?.providers.groq}>Groq{!overview?.providers.groq ? ' - not configured' : ''}</option></select>
-      <button className="button primary" onClick={investigate} disabled={busy || investigating}>{busy || investigating ? <LoaderCircle size={16} className="spin" /> : <Fingerprint size={16} />}{investigating ? 'Investigating' : 'Investigate'}</button>
+      <WorkflowLabel providers={overview?.providers} />
+      <button className="button primary" onClick={investigate} disabled={!overview?.providers.groq || busy || investigating}>{busy || investigating ? <LoaderCircle size={16} className="spin" /> : <Fingerprint size={16} />}{investigating ? 'Investigating' : 'Investigate'}</button>
     </div></div>
-    <p className="import-guidance">Evidence rules provide an inconclusive observation summary for unfamiliar applications. Choosing Groq explicitly sends selected redacted evidence to the configured provider.</p>
+    <p className="import-guidance">Investigate sends selected redacted observations to OpenRouter Jev for initial triage, then Groq for an assessment. Missing evidence remains unknown; review the cited sources and limitations.</p>
     {error && <p className="import-error" role="alert">{error}</p>}
     <div className="detail-tabs">{['assessment', 'log', 'span', 'metric'].map(kind => <button key={kind} className={tab === kind ? 'active' : ''} onClick={() => { setTab(kind); setOffset(0); setPage(null); setQuery('') }}>{({ assessment: 'Assessment', log: 'Logs', span: 'Traces', metric: 'Metrics' })[kind]}</button>)}</div>
     {tab === 'assessment' ? <>
@@ -174,7 +172,7 @@ export function ImportWorkspace(props: ViewProps) {
         <div className="incident-list">{collections.map(item => <button className={'incident-item ' + (item.id === selected ? 'selected' : '')} key={item.id} onClick={() => setSelected(item.id)}><h3>{item.title}</h3><p>{item.summary.observations} observations · {item.source_type}</p><FullTime value={item.created_at} /></button>)}</div>
         {!collections.length && <p className="import-guidance">Save logs above to begin. Importing creates no incident or model request.</p>}
       </section>
-      {selected ? <CollectionView key={selected} id={selected} {...props} /> : <section className="detail-panel"><div className="report-empty"><FileText size={28} /><h3>Your application, your evidence.</h3><p>Import logs without knowing the root cause. Review the saved observations, then choose an investigation engine.</p></div></section>}
+      {selected ? <CollectionView key={selected} id={selected} {...props} /> : <section className="detail-panel"><div className="report-empty"><FileText size={28} /><h3>Your application, your evidence.</h3><p>Import logs without knowing the root cause. Review the saved observations, then explicitly investigate.</p></div></section>}
     </div>
   </div>
 }

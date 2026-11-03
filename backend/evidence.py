@@ -239,6 +239,8 @@ class EvidenceContext:
         self.queries = []
         self.topology = None
         self.trace_sources = set()
+        self.triage = None
+        self.triage_included = "not_requested"
 
     def add(self, name, args, result):
         if isinstance(result, dict):
@@ -253,6 +255,7 @@ class EvidenceContext:
                              "query_limit_reached": result.get("query_limit_reached", False) if isinstance(result, dict) else False})
 
     def payload(self, base, system, instruction, budget=INPUT_BYTES):
+        self.triage_included = "omitted_to_preserve_evidence" if self.triage else "not_available"
         evidence_budget = budget
         while evidence_budget >= 0:
             evidence = compact(list(self.records.values()), evidence_budget, self.trace_sources)
@@ -280,6 +283,29 @@ class EvidenceContext:
                     raise ValueError("No useful observation fits the complete Groq input bound. Import smaller observations.")
                 if self.trace_sources and not self.trace_sources <= set(supplied):
                     raise ValueError("The requested trace group cannot fit intact within the Groq input bound.")
+                # Advisory hints use spare bytes only: they never evict observations.
+                if self.triage:
+                    hint = deepcopy(self.triage)
+                    hint["priorities"] = [group for group in hint["priorities"] if set(group["source_ids"]) <= set(supplied)]
+                    compact_hint = {"note": "Advisory only, not evidence. Test alternatives and conflicting observations.",
+                                    "category": hint.get("category"), "priorities": hint["priorities"][:2]}
+                    focus_hint = {"note": "Advisory only; test alternatives.", "category": hint.get("category"),
+                                  "priority_sources": [source for g in hint["priorities"][:1] for source in g["source_ids"]]}
+                    for label, value in (("full", hint), ("compact", compact_hint), ("focus", focus_hint)):
+                        augmented = deepcopy(payload)
+                        augmented["messages"][1]["content"] += "\nAdvisory initial triage: " + encoded(value).decode()
+                        if len(encoded(augmented)) > budget:
+                            # Repeated query-field names are expendable; source observations are not.
+                            lean_context = {**context, "recent_queries": {
+                                "columns": ["tool", "arguments", "returned", "omitted_groups", "query_limit_reached"],
+                                "rows": [[q.get(k) for k in ("tool", "arguments", "returned", "omitted_groups", "query_limit_reached")]
+                                         for q in self.queries[-6:]]}}
+                            augmented["messages"][1]["content"] = (instruction + "\nOperational data: " + encoded(lean_context).decode()
+                                                                  + "\nAdvisory initial triage: " + encoded(value).decode())
+                        if len(encoded(augmented)) <= budget:
+                            payload = augmented
+                            self.triage_included = label
+                            break
                 return payload, set(supplied)
             evidence_budget -= max(128, excess)
         raise ValueError("Groq input allowance is insufficient for the required request schema.")

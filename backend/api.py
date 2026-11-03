@@ -9,11 +9,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 from . import auth, db
-from .config import ROOT, GROQ_KEY, ORIGINS, SERVICES, service_url
+from .config import ROOT, GROQ_KEY, JEV_KEY, ORIGINS, SERVICES, service_url
 from .investigator import Investigator
 from .scenarios import ScenarioController
 from .supplements import saved_evidence
-from .provider import groq_http_client
+from .provider import groq_http_client, jev_http_client
+from .triage import JevTriage
 from .imports import read_import, create_collection, public_collection
 
 def owned(request, table, record_id):
@@ -39,6 +40,16 @@ def serialize_supplement(row):
 def active_jobs(conn, owner):
     return conn.execute("SELECT COUNT(*) FROM (SELECT id FROM investigations WHERE user_id=? AND state IN ('queued','running','quota_waiting') UNION ALL SELECT id FROM supplements WHERE user_id=? AND state IN ('queued','running','quota_waiting'))",
                         (owner, owner)).fetchone()[0]
+
+
+def investigation_options(data):
+    engine = data.get("engine", "rules")
+    if set(data) - {"engine", "triage"} or engine not in {"rules", "groq"}:
+        raise HTTPException(400, "Choose evidence rules or Groq.")
+    if "triage" in data and (type(data["triage"]) is not bool or engine != "groq"):
+        raise HTTPException(400, "Triage must be a boolean and requires Groq.")
+    usage = {"triage": {"requested": True, "state": "pending"}} if data.get("triage") else {}
+    return engine, json.dumps(usage)
 
 
 async def import_logs(request):
@@ -92,9 +103,7 @@ async def start_collection_investigation(request):
     collection = owned(request, "collections", request.path_params["id"])
     auth.csrf(request)
     data = await auth.body(request)
-    engine = data.get("engine", "rules")
-    if set(data) - {"engine"} or engine not in {"rules", "groq"}:
-        raise HTTPException(400, "Choose evidence rules or Groq.")
+    engine, usage = investigation_options(data)
     if engine == "groq" and not GROQ_KEY:
         raise HTTPException(409, "Groq is not configured. Use evidence rules or configure the server key.")
     with db.connection() as conn:
@@ -106,8 +115,8 @@ async def start_collection_investigation(request):
         if active_jobs(conn, collection["user_id"]) >= 2:
             raise HTTPException(429, "You already have two active jobs, including investigations and further analysis.")
         investigation_id = db.uid()
-        conn.execute("INSERT INTO investigations(id,collection_id,user_id,engine,state,created_at) VALUES(?,?,?,?,?,?)",
-                     (investigation_id, collection["id"], collection["user_id"], engine, "queued", db.now()))
+        conn.execute("INSERT INTO investigations(id,collection_id,user_id,engine,state,created_at,usage) VALUES(?,?,?,?,?,?,?)",
+                     (investigation_id, collection["id"], collection["user_id"], engine, "queued", db.now(), usage))
     request.app.state.investigator.enqueue(investigation_id)
     return JSONResponse({"id": investigation_id}, status_code=202)
 
@@ -157,7 +166,7 @@ async def overview(request):
     counts["incidents"] = db.one("SELECT COUNT(*) count FROM incidents WHERE user_id=?", (user["id"],))["count"]
     counts["evidence"] = db.one("SELECT COUNT(*) count FROM evidence WHERE user_id=?", (user["id"],))["count"]
     return JSONResponse({"services": services, "counts": counts,
-                         "providers": {"groq": bool(GROQ_KEY), "jev": False},
+                         "providers": {"groq": bool(GROQ_KEY), "jev": bool(JEV_KEY)},
                          "runtime_busy": request.app.state.controller.lock.locked()})
 
 async def runs(request):
@@ -211,9 +220,7 @@ async def start_investigation(request):
     incident = owned(request, "incidents", request.path_params["id"])
     auth.csrf(request)
     data = await auth.body(request)
-    engine = data.get("engine", "rules")
-    if engine not in {"rules", "groq"}:
-        raise HTTPException(400, "Unknown analysis engine.")
+    engine, usage = investigation_options(data)
     if engine == "groq" and not GROQ_KEY:
         raise HTTPException(409, "Groq is not configured. Use evidence rules or configure the server key.")
     run = db.one("SELECT state FROM runs WHERE id=?", (incident["run_id"],))
@@ -227,8 +234,8 @@ async def start_investigation(request):
         if duplicate:
             raise HTTPException(409, "This incident is already being investigated.")
         investigation_id = db.uid()
-        conn.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at) VALUES(?,?,?,?,?,?)",
-                     (investigation_id, incident["id"], incident["user_id"], engine, "queued", db.now()))
+        conn.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at,usage) VALUES(?,?,?,?,?,?,?)",
+                     (investigation_id, incident["id"], incident["user_id"], engine, "queued", db.now(), usage))
     request.app.state.investigator.enqueue(investigation_id)
     return JSONResponse({"id": investigation_id}, status_code=202)
 
@@ -241,10 +248,10 @@ async def error_response(request, exc):
 @asynccontextmanager
 async def lifespan(app):
     db.init()
-    async with httpx.AsyncClient(trust_env=False) as local, groq_http_client() as provider:
+    async with httpx.AsyncClient(trust_env=False) as local, groq_http_client() as provider, jev_http_client() as jev:
         app.state.local = local
         app.state.controller = ScenarioController(local)
-        app.state.investigator = Investigator(provider)
+        app.state.investigator = Investigator(provider, triage=JevTriage(jev))
         app.state.investigator.start()
         yield
         await app.state.controller.close()

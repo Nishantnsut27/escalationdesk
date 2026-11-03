@@ -69,6 +69,12 @@ def init():
         INSERT OR IGNORE INTO schema_version VALUES(2);
         """)
         migrate_collections(conn)
+        for row in conn.execute("SELECT id, usage FROM investigations WHERE state IN ('queued','running','quota_waiting')").fetchall():
+            usage = json.loads(row["usage"])
+            triage = usage.get("triage")
+            if triage and triage.get("state") in {"pending", "running"}:
+                triage.update(state="interrupted", completed_at=now(), reason="Server restarted before triage finished.")
+                conn.execute("UPDATE investigations SET usage=? WHERE id=?", (json.dumps(usage), row["id"]))
         conn.execute("UPDATE supplements SET state='interrupted', completed_at=?, error='Server restarted. Retry further analysis to create a new retained attempt.' WHERE state IN ('queued','running','quota_waiting')", (now(),))
         conn.execute("UPDATE investigations SET state='interrupted', error='Server restarted. Start a new investigation.' WHERE state IN ('queued','running','quota_waiting')")
         conn.execute("UPDATE runs SET state='interrupted', ended_at=? WHERE state IN ('running','starting','resetting')", (now(),))

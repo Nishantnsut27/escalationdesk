@@ -38,12 +38,24 @@ export type Investigation = {
   report: Report | null; activity: { tool: string; timestamp: string; count: number; evidence_ids?: string[]; omitted_groups?: number; query_limit_reached?: boolean }[]
   supplements?: Supplement[]
   usage: { model?: string; duration_ms?: number; total_tokens?: number; requests?: number
+    triage?: Triage
     progress?: string; retry_at?: string; wait_reason?: string; quota_wait_seconds?: number
     estimated_input_tokens?: number; supplied_evidence_ids?: string[]; coverage?: string; available_sources?: number
     omitted_sources?: number; unavailable_source_ids?: string[]
     diagnostics?: { attempt: number; phase: string; status?: number | string; input_bytes: number
       estimated_input_tokens: number; duration_ms?: number; limit_category?: string; retry_at?: string
       actual_usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }[] }
+}
+export type Triage = {
+  requested: boolean; state: 'pending' | 'running' | 'completed' | 'fallback' | 'interrupted'
+  reason?: string; requested_model?: string; returned_model?: string; taxonomy_version?: string
+  category?: string; probabilities?: Record<string, number>; confidence?: number
+  requests?: number; duration_ms?: number; wait_seconds?: number; retry_at?: string
+  actual_usage?: { input_tokens?: number; output_tokens?: number }; cost?: number; provider?: string
+  source_ids?: string[]; input_bytes?: number; started_at?: string; completed_at?: string
+  advisory_context?: string
+  coverage?: { baseline_observations: number; represented_groups: number; omitted_groups: number; note: string }
+  groups?: { id: string; source_ids: string[]; score?: number; confidence?: number }[]
 }
 export type ReportEvidence = {
   investigation_id: string; evidence: Evidence[]; source_ids: string[]; unavailable_source_ids: string[]

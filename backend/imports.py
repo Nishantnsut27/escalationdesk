@@ -208,7 +208,7 @@ def parse_logs(content, default_service="unknown"):
     counts["services"] = services
     counts["kinds"] = sorted({row["kind"] for row in rows})
     counts["coverage"] = "Only the supplied text; no telemetry was fetched."
-    counts["redaction_note"] = "Common credential fields/patterns are redacted; review the saved content before sending evidence to Groq."
+    counts["redaction_note"] = "Common credential fields/patterns are redacted; review the saved content before sending evidence to model providers."
     return rows, counts
 
 

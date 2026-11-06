@@ -25,7 +25,7 @@ def user(request, write=False):
 
 def connection(request, write=False):
     owner = user(request, write)
-    row = db.one("SELECT * FROM sentry_connections WHERE id=? AND user_id=?", (request.path_params["id"], owner["id"]))
+    row = db.one("SELECT * FROM sentry_connections WHERE id=%s AND user_id=%s", (request.path_params["id"], owner["id"]))
     if not row:
         raise HTTPException(404, "Sentry connection not found.")
     return row
@@ -33,7 +33,7 @@ def connection(request, write=False):
 
 def job(request, write=False):
     owner = user(request, write)
-    row = db.one("SELECT * FROM sentry_imports WHERE id=? AND user_id=?", (request.path_params["id"], owner["id"]))
+    row = db.one("SELECT * FROM sentry_imports WHERE id=%s AND user_id=%s", (request.path_params["id"], owner["id"]))
     if not row:
         raise HTTPException(404, "Sentry import not found.")
     return row
@@ -47,8 +47,8 @@ def public_connection(row):
 async def listing(request):
     owner = user(request)
     return JSONResponse({"configured": configured(), "public_url": config.PUBLIC_URL,
-        "connections": [public_connection(r) for r in db.all_rows("SELECT * FROM sentry_connections WHERE user_id=? ORDER BY created_at DESC", (owner["id"],))],
-        "imports": [public_import(r) for r in db.all_rows("SELECT * FROM sentry_imports WHERE user_id=? ORDER BY created_at DESC LIMIT 50", (owner["id"],))]})
+        "connections": [public_connection(r) for r in db.all_rows("SELECT * FROM sentry_connections WHERE user_id=%s ORDER BY created_at DESC", (owner["id"],))],
+        "imports": [public_import(r) for r in db.all_rows("SELECT * FROM sentry_imports WHERE user_id=%s ORDER BY created_at DESC LIMIT 50", (owner["id"],))]})
 
 
 async def start(request):
@@ -62,8 +62,8 @@ async def start(request):
         raise HTTPException(409, "Open this app at its configured HTTPS address and sign in before connecting Sentry.")
     state = secrets.token_urlsafe(32)
     with db.connection() as conn:
-        conn.execute("DELETE FROM sentry_oauth_states WHERE expires<? OR session_digest=?", (time.time(), auth.digest(request.cookies[auth.COOKIE])))
-        conn.execute("INSERT INTO sentry_oauth_states VALUES(?,?,?,?,?)", (auth.digest(state), owner["id"], auth.digest(request.cookies[auth.COOKIE]), data["region"], time.time() + 600))
+        conn.execute("DELETE FROM sentry_oauth_states WHERE expires<%s OR session_digest=%s", (time.time(), auth.digest(request.cookies[auth.COOKIE])))
+        conn.execute("INSERT INTO sentry_oauth_states VALUES(%s,%s,%s,%s,%s)", (auth.digest(state), owner["id"], auth.digest(request.cookies[auth.COOKIE]), data["region"], time.time() + 600))
     return JSONResponse({"url": f"{CONTROL}/sentry-apps/{config.SENTRY_APP_SLUG}/external-install/?" + urlencode({"state": state})})
 
 
@@ -73,18 +73,18 @@ async def callback(request):
         raise HTTPException(409, "Sentry OAuth is not configured.")
     params = request.query_params
     with db.connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        state = conn.execute("SELECT * FROM sentry_oauth_states WHERE digest=? AND user_id=? AND session_digest=? AND expires>?",
+        db.lock(conn)
+        state = conn.execute("SELECT * FROM sentry_oauth_states WHERE digest=%s AND user_id=%s AND session_digest=%s AND expires>%s",
             (auth.digest(params.get("state", "")), owner["id"], auth.digest(request.cookies[auth.COOKIE]), time.time())).fetchone()
         if not state:
             raise HTTPException(400, "Sentry authorization expired or did not match your session. Start Connect Sentry again.")
-        conn.execute("DELETE FROM sentry_oauth_states WHERE digest=?", (state["digest"],))
+        conn.execute("DELETE FROM sentry_oauth_states WHERE digest=%s", (state["digest"],))
     if params.get("error"):
         return RedirectResponse(config.PUBLIC_URL + "/#connections?oauth=cancelled", status_code=303)
     installation, organization, code = params.get("installationId", ""), params.get("orgSlug", ""), params.get("code", "")
     if not INSTALLATION.fullmatch(installation) or not SLUG.fullmatch(organization) or not 1 <= len(code) <= 4096:
         raise HTTPException(400, "Sentry returned incomplete authorization information. Reconnect.")
-    existing = db.one("SELECT * FROM sentry_connections WHERE installation_id=?", (installation,))
+    existing = db.one("SELECT * FROM sentry_connections WHERE installation_id=%s", (installation,))
     previous_generation = existing["generation"] if existing else None
     if existing and existing["user_id"] != owner["id"]:
         raise HTTPException(409, "This Sentry installation is already owned by another workspace.")
@@ -98,19 +98,19 @@ async def callback(request):
                              token=tokens["token"], payload={"status": "installed"})
         encrypted = seal(tokens)
         with db.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            if conn.execute("SELECT 1 FROM sentry_deliveries WHERE installation_id=? AND action='deleted'", (installation,)).fetchone():
+            db.lock(conn)
+            if conn.execute("SELECT 1 FROM sentry_deliveries WHERE installation_id=%s AND action='deleted'", (installation,)).fetchone():
                 raise HTTPException(409, "This installation was removed during setup. Install Sentry again.")
-            existing = conn.execute("SELECT * FROM sentry_connections WHERE installation_id=?", (installation,)).fetchone()
+            existing = conn.execute("SELECT * FROM sentry_connections WHERE installation_id=%s", (installation,)).fetchone()
             if existing:
                 if existing["user_id"] != owner["id"]:
                     raise HTTPException(409, "This installation is already owned by another workspace.")
                 if previous_generation != existing["generation"]:
                     raise HTTPException(409, "The connection changed during authorization. Start Connect Sentry again.")
-                conn.execute("UPDATE sentry_connections SET credentials=?,expires_at=?,state='connected',organization=?,region=?,projects=?,capabilities='{}',error=NULL,checked_at=?,generation=generation+1 WHERE id=?",
+                conn.execute("UPDATE sentry_connections SET credentials=%s,expires_at=%s,state='connected',organization=%s,region=%s,projects=%s,capabilities='{}',error=NULL,checked_at=%s,generation=generation+1 WHERE id=%s",
                     (encrypted, expiry, organization, state["region"], json.dumps(projects), db.now(), existing["id"]))
             else:
-                conn.execute("INSERT INTO sentry_connections(id,user_id,installation_id,organization,region,credentials,expires_at,state,projects,created_at,checked_at) VALUES(?,?,?,?,?,?,?,'connected',?,?,?)",
+                conn.execute("INSERT INTO sentry_connections(id,user_id,installation_id,organization,region,credentials,expires_at,state,projects,created_at,checked_at) VALUES(%s,%s,%s,%s,%s,%s,%s,'connected',%s,%s,%s)",
                     (db.uid(), owner["id"], installation, organization, state["region"], encrypted, expiry, json.dumps(projects), db.now(), db.now()))
     except SentryError as exc:
         raise HTTPException(502, str(exc)) from None
@@ -140,32 +140,32 @@ async def check(request):
                     capabilities[dataset] = {"state": "unavailable" if exc.status in {403, 404} else "error", "reason": str(exc)}
                     if exc.status == 401:
                         raise
-        db.execute("UPDATE sentry_connections SET projects=?,capabilities=?,checked_at=?,error=NULL WHERE id=? AND generation=? AND state='connected'",
+        db.execute("UPDATE sentry_connections SET projects=%s,capabilities=%s,checked_at=%s,error=NULL WHERE id=%s AND generation=%s AND state='connected'",
             (json.dumps(projects), json.dumps(capabilities), db.now(), row["id"], row["generation"]))
     except SentryError as exc:
-        db.execute("UPDATE sentry_connections SET error=?,checked_at=? WHERE id=? AND generation=?", (str(exc), db.now(), row["id"], row["generation"]))
+        db.execute("UPDATE sentry_connections SET error=%s,checked_at=%s WHERE id=%s AND generation=%s", (str(exc), db.now(), row["id"], row["generation"]))
         raise HTTPException(502, str(exc)) from None
-    return JSONResponse(public_connection(db.one("SELECT * FROM sentry_connections WHERE id=?", (row["id"],))))
+    return JSONResponse(public_connection(db.one("SELECT * FROM sentry_connections WHERE id=%s", (row["id"],))))
 
 
 def cancel_jobs(conn, connection_id):
-    rows = conn.execute("SELECT collection_id FROM sentry_imports WHERE connection_id=? AND state IN ('queued','running','rate_limited')", (connection_id,)).fetchall()
-    conn.execute("UPDATE sentry_imports SET state='cancelled',completed_at=?,error='Sentry connection was disconnected.' WHERE connection_id=? AND state IN ('queued','running','rate_limited')", (db.now(), connection_id))
+    rows = conn.execute("SELECT collection_id FROM sentry_imports WHERE connection_id=%s AND state IN ('queued','running','rate_limited')", (connection_id,)).fetchall()
+    conn.execute("UPDATE sentry_imports SET state='cancelled',completed_at=%s,error='Sentry connection was disconnected.' WHERE connection_id=%s AND state IN ('queued','running','rate_limited')", (db.now(), connection_id))
     for item in rows:
         finish_coverage(conn, item["collection_id"], "Import cancelled on disconnect. Retained evidence is partial.")
 
 
 def finish_coverage(conn, collection_id, message):
-    summary = json.loads(conn.execute("SELECT summary FROM collections WHERE id=?", (collection_id,)).fetchone()[0])
+    summary = json.loads(conn.execute("SELECT summary FROM collections WHERE id=%s", (collection_id,)).fetchone()[0])
     summary["coverage"] = message
-    conn.execute("UPDATE collections SET summary=? WHERE id=?", (json.dumps(summary), collection_id))
+    conn.execute("UPDATE collections SET summary=%s WHERE id=%s", (json.dumps(summary), collection_id))
 
 
 async def disconnect(request):
     row = connection(request, True)
     with db.connection() as conn:
-        conn.execute("DELETE FROM sentry_oauth_states WHERE user_id=?", (row["user_id"],))
-        conn.execute("UPDATE sentry_connections SET state='disconnected',credentials=NULL,expires_at=0,generation=generation+1 WHERE id=?", (row["id"],))
+        conn.execute("DELETE FROM sentry_oauth_states WHERE user_id=%s", (row["user_id"],))
+        conn.execute("UPDATE sentry_connections SET state='disconnected',credentials=NULL,expires_at=0,generation=generation+1 WHERE id=%s", (row["id"],))
         cancel_jobs(conn, row["id"])
     return JSONResponse({"ok": True, "message": "Disconnected locally. You can also uninstall Escalation Desk in Sentry's integration settings."})
 
@@ -196,11 +196,11 @@ async def webhook(request):
     if request.headers.get("sentry-hook-resource") != "installation" or value.get("action") not in {"created", "deleted"}:
         return JSONResponse({"ok": True, "ignored": True})
     with db.connection() as conn:
-        added = conn.execute("INSERT OR IGNORE INTO sentry_deliveries VALUES(?,?,?,?)", (hashlib.sha256(raw).hexdigest(), installation, value["action"], db.now())).rowcount
+        added = conn.execute("INSERT INTO sentry_deliveries VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING digest", (hashlib.sha256(raw).hexdigest(), installation, value["action"], db.now())).fetchone()
         if added and value["action"] == "deleted":
-            row = conn.execute("SELECT id FROM sentry_connections WHERE installation_id=?", (installation,)).fetchone()
+            row = conn.execute("SELECT id FROM sentry_connections WHERE installation_id=%s", (installation,)).fetchone()
             if row:
-                conn.execute("UPDATE sentry_connections SET state='disconnected',credentials=NULL,expires_at=0,generation=generation+1 WHERE id=?", (row["id"],))
+                conn.execute("UPDATE sentry_connections SET state='disconnected',credentials=NULL,expires_at=0,generation=generation+1 WHERE id=%s", (row["id"],))
                 cancel_jobs(conn, row["id"])
     return JSONResponse({"ok": True})
 
@@ -222,7 +222,7 @@ async def import_retry(request):
     old = job(request, True)
     if old["state"] not in {"failed", "partial", "interrupted", "cancelled"}:
         raise HTTPException(409, "Retry is available for incomplete imports only.")
-    row = db.one("SELECT * FROM sentry_connections WHERE id=? AND user_id=?", (old["connection_id"], old["user_id"]))
+    row = db.one("SELECT * FROM sentry_connections WHERE id=%s AND user_id=%s", (old["connection_id"], old["user_id"]))
     result, created = create_import(old["user_id"], row, parameters(json.loads(old["parameters"]), row), old["id"])
     if created:
         request.app.state.sentry_importer.wake()
@@ -232,10 +232,10 @@ async def import_retry(request):
 async def import_cancel(request):
     row = job(request, True)
     with db.connection() as conn:
-        changed = conn.execute("UPDATE sentry_imports SET state='cancelled',completed_at=? WHERE id=? AND state IN ('queued','running','rate_limited')", (db.now(), row["id"])).rowcount
+        changed = conn.execute("UPDATE sentry_imports SET state='cancelled',completed_at=%s WHERE id=%s AND state IN ('queued','running','rate_limited') RETURNING id", (db.now(), row["id"])).fetchone()
         if changed:
             finish_coverage(conn, row["collection_id"], "Cancelled import. Retained evidence is partial.")
-    return JSONResponse(public_import(db.one("SELECT * FROM sentry_imports WHERE id=?", (row["id"],))))
+    return JSONResponse(public_import(db.one("SELECT * FROM sentry_imports WHERE id=%s", (row["id"],))))
 
 
 routes = [

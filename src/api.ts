@@ -8,11 +8,13 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     credentials: 'same-origin',
     ...(body !== undefined ? { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body) } : {}),
   })
-  const data = await response.json()
+  let data
+  try { data = await response.json() }
+  catch { throw new ApiError('The server could not complete this request. Please try again shortly.', response.status) }
   if (!response.ok) throw new ApiError(data.error || 'The request could not be completed.', response.status)
   return data as T
 }
-export type User = { id: string; name: string; email: string; role: 'regular' | 'demo'; read_only: boolean }
+export type User = { id: string; name: string; email: string; role: 'regular' | 'demo'; read_only: boolean; email_verified: boolean }
 export type Session = { user: User; csrf: string }
 export type Evidence = {
   id: string; kind: 'log' | 'span' | 'metric'; service: string; timestamp: string | null

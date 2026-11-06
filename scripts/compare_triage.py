@@ -56,20 +56,26 @@ def freeze(case, source=None):
 
 def install_snapshot(case, snapshot):
     db.DATA = BASE / case / 'data'
+    from backend import postgres
+    from psycopg import sql
+    db._target = postgres.test_target()
+    db._schema = 'operator_comparison_' + hashlib.sha256(case.encode()).hexdigest()[:16]
+    with postgres.connection(db._target) as conn:
+        conn.execute(sql.SQL('CREATE SCHEMA IF NOT EXISTS {}').format(sql.Identifier(db._schema)))
     db.init()
     owner, scope = 'phase7-evaluator', 'frozen-evidence'
-    db.execute('INSERT OR IGNORE INTO users VALUES(?,?,?,?,?)', (owner, owner, 'phase7@evaluation.invalid', 'login-disabled', db.now()))
+    db.execute('INSERT INTO users VALUES(%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING', (owner, owner, 'phase7@evaluation.invalid', 'login-disabled', db.now()))
     imported = snapshot['summary'] is not None
     if imported:
-        db.execute('INSERT OR IGNORE INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)',
+        db.execute('INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
                    (scope, owner, 'Evaluation observations', 'Inspect the supplied observations.', 'paste', db.now(), snapshot['sha256'], json.dumps(snapshot['summary'])))
     else:
-        db.execute('INSERT OR IGNORE INTO runs(id,user_id,scenario,state,created_at) VALUES(?,?,?,?,?)',
+        db.execute('INSERT INTO runs(id,user_id,scenario,state,created_at) VALUES(%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
                    (scope, owner, 'recorded', 'completed', db.now()))
-        db.execute('INSERT OR IGNORE INTO incidents VALUES(?,?,?,?,?,?,?)', (scope, scope, owner, 'Evaluation observations', 'resolved', db.now(), db.now()))
+        db.execute('INSERT INTO incidents VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING', (scope, scope, owner, 'Evaluation observations', 'resolved', db.now(), db.now()))
     field = 'collection_id' if imported else 'run_id'
     for row in snapshot['evidence']:
-        db.execute(f'INSERT OR IGNORE INTO evidence(id,{field},user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)',
+        db.execute(f'INSERT INTO evidence(id,{field},user_id,kind,service,timestamp,payload) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
                    (row['id'], scope, owner, row['kind'], row['service'], row.get('timestamp'), json.dumps(row)))
     return owner, scope, imported
 
@@ -103,10 +109,10 @@ async def run(args):
                 id = db.uid()
                 usage = {'triage': {'requested': True, 'state': 'pending'}} if mode == 'combined' else {}
                 field = 'collection_id' if imported else 'incident_id'
-                db.execute(f'INSERT INTO investigations(id,{field},user_id,engine,state,created_at,usage) VALUES(?,?,?,?,?,?,?)',
+                db.execute(f'INSERT INTO investigations(id,{field},user_id,engine,state,created_at,usage) VALUES(%s,%s,%s,%s,%s,%s,%s)',
                            (id, scope, owner, 'groq', 'queued', db.now(), json.dumps(usage)))
                 await worker.investigate(id)
-                row = db.one('SELECT * FROM investigations WHERE id=?', (id,))
+                row = db.one('SELECT * FROM investigations WHERE id=%s', (id,))
                 output.update(state=row['state'], investigation_id=id, report=json.loads(row['report']) if row['report'] else None,
                               usage=json.loads(row['usage']), activity=json.loads(row['activity']), error=row['error'])
             path = BASE / args.case / f'{mode}-{time.time_ns()}.json'

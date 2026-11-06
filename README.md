@@ -1,4 +1,4 @@
-# Escalation Desk
+# TraceDesk
 
 A working local proof of concept for investigating failures across connected services.
 
@@ -12,7 +12,7 @@ The local dependencies and frontend build are already prepared.
 .\start.ps1
 ~~~
 
-Open **http://127.0.0.1:8020** on this machine and create your own account. **Demo Account** accepts **`Demo@login`** and currently contains five reviewed recordings. The login screen shows the actual available count. The normal workspace opens on saved evidence, with Connections and Import logs as entry points.
+Configure the backend settings in [.env.example](.env.example) first. Existing SQLite installations must follow the migration procedure below before restarting this version. Open **http://127.0.0.1:8020** on this machine and create your own account. **Demo Account** accepts **`Demo@login`**; the bundle currently contains six reviewed recordings. The login screen shows the installed count. The normal workspace opens on saved evidence, with Connections and Import logs as entry points.
 
 Stop with Ctrl+C in the launcher, or from another terminal:
 
@@ -24,7 +24,7 @@ The launcher uses `DESK_PORT` (8020 on this machine), checks readiness and repor
 
 ## Try the complete flow
 
-1. Create an account with a password of at least 10 characters, or sign in.
+1. Create an account with a password of 10–128 characters, or sign in. Unverified regular accounts see a verification screen; confirm the email and check verification to enter the workspace. Existing saved history is retained.
 2. Open Connections to authorize Sentry, or Import logs to upload/paste application observations.
 3. Select the projects and time window for a Sentry import, then review the saved evidence.
 4. Click **Investigate** to run Jev triage followed by Groq.
@@ -35,6 +35,8 @@ Demo Account browses saved reports without provider calls. Recorded history reta
 ## What is implemented
 
 - Real signup/login/logout with Argon2id password hashes, expiring server-side sessions, HttpOnly cookies, CSRF checks and authentication throttling.
+- Email verification and password recovery through Resend, with explicit single-use link confirmation, encrypted queued messages, bounded retries and signed delivery webhooks. Real verification/reset email delivery is user-confirmed; live webhook receipts await the signing secret.
+- PostgreSQL platform storage through psycopg 3, a bounded connection pool, verified TLS and versioned migrations. The reference workloads retain separate SQLite stores.
 - Account ownership enforced by the backend for runs, incidents, investigations and evidence.
 - Sentry public-integration OAuth, encrypted account-owned connections, explicit snapshot imports and optional reference-service instrumentation. See [Sentry setup](#sentry-setup) and the verification results below for local and public acceptance.
 - Controlled workload recordings remain available for reviewed demos and offline regression checks. The normal launcher starts only the workspace.
@@ -45,14 +47,14 @@ Demo Account browses saved reports without provider calls. Recorded history reta
 - A quota-aware Groq investigator with compact evidence, strict source citations, automatic wait/resume and saved diagnostics.
 - Owned pasted/file log imports with coverage and redaction details, arbitrary service names and retained source content.
 - Bounded Jev classification and observation priorities through OpenRouter, separate provider usage and visible Groq-only fallback.
-- A read-only twelve-case demo gallery and offline installer; publication awaits completion of the saved-report review described below.
+- A read-only demo gallery and offline installer with six published cases. Six additional captured cases are deferred for later report review.
 - Saved collections and previous incident history remain readable; new evidence comes from imports and connections.
 
 The main interface has one investigation action. Deterministic **Evidence rules** and standalone Groq remain available through legacy APIs; comparison scripts provide standalone Jev, Groq and combined modes. Scenario names and controller flags are not passed to the investigator.
 
 ## POC implementation and product plan
 
-This POC uses the user-approved stack retained for the next phases: Python 3.14, Starlette, HTTPX, sqlite3 and React/TypeScript/Vite.
+This POC uses Python 3.14, Starlette, HTTPX, psycopg 3/PostgreSQL and React/TypeScript/Vite. Reference workloads use sqlite3.
 
 Its connection pool holds real SQLite connections. Its trace exporter records actual operation durations and W3C parent relationships. These are lightweight POC implementations, not SQLAlchemy pooling or the OpenTelemetry SDK.
 
@@ -62,11 +64,11 @@ Phase 7 browser acceptance passed, user-verified on 2026-11-03. Phase 8 adds rec
 
 The twelve controlled recordings cover payment pool exhaustion, slow payment processing, application exception, missing database migration, unavailable dependency, authentication rejection, incomplete evidence, failed rolling deployment, startup configuration failure, expired TLS certificate, API throttling/retries, and a background-job backlog.
 
-**Available now:** [bundle.json](demo/v1/bundle.json) contains five reviewed reports: application exception, missing database migration, rejected upstream authentication, incomplete evidence, and API throttling. Their 2,652 log records and cited evidence are installed automatically. All twelve source recordings remain in [recordings.json](demo/v1/recordings.json); seven reports still need acceptance before publication. Rejected reports are not published. Exporting selected reviewed cases adds them to the existing bundle and rejects changes to published cases before replacing the file.
+**In the bundle:** [bundle.json](demo/v1/bundle.json) contains six reviewed reports: application exception, missing database migration, rejected upstream authentication, incomplete evidence, API throttling, and payment pool exhaustion. All twelve source recordings remain in [recordings.json](demo/v1/recordings.json). Slow processing, unavailable dependency, rolling deployment, startup failure, expired TLS and job backlog are deferred; their reports still need acceptance before publication. Rejected reports are retained locally. Exporting reviewed cases adds them to the bundle and rejects changes to previously published cases.
 
 These are real local HTTP/process/SQLite/TLS/queue executions, labelled as recorded examples. They are not customer production logs or actual cloud deployments. Each case contains at least 500 distinct captured log records; spans and metrics are additional. Open the Assessment, Logs, Traces or Metrics tabs and click any source to inspect the retained observation. Browsing and searching never invokes a model.
 
-The versioned bundle at `demo/v1/bundle.json` installs transactionally on startup without network access. Installation is idempotent, retains recorded IDs/timestamps, and allows additional reviewed cases while rejecting removal or rewriting of already installed cases. The public password is stored as an Argon2id hash. Backend permissions deny demo investigations, supplements, imports, scenario controls and other mutations.
+The versioned bundle at `demo/v1/bundle.json` installs transactionally into PostgreSQL on startup without model-provider calls. Installation is idempotent, retains recorded IDs/timestamps, and allows additional reviewed cases while rejecting removal or rewriting of installed cases. The public password is stored as an Argon2id hash. Backend permissions deny demo investigations, supplements, imports, scenario controls and other mutations.
 
 Live scenario controls and the fixed reference topology have been removed from the normal app. Existing saved evidence is retained. Regression tests explicitly enable the development lab with `DESK_ENABLE_LAB=1`; the default is disabled.
 
@@ -83,6 +85,22 @@ Operator preparation is separate from visitor access:
 
 Only `analyze --live` requests providers. Review each actual report and its cited observations before accepting it; export requires a current hash-bound review for every selected case. The exporter automatically retains previously published cases; only newly reviewed cases need to be selected. Preparation retains captures and all provider attempts under `.cache/phase8/v1`. `capture` restores shipped recordings when local snapshots are absent; `capture --recapture` archives the preceding draft capture and report before recording again. `--retry` creates a new analysis attempt. Optional `--reuse-queries` replays an existing read-only query plan for the fixed capture before fresh Jev triage and a fresh Groq report, with separate provenance; normal user investigations still select queries live. `--questions-file` accepts symptom questions, never expected answers or controller flags. `select --case CASE --attempt ID` selects an unchanged retained completed response. Never edit provider output to pass review. This curated gallery is separate from the planned comparative quality benchmark.
 
+Resume the deferred cases from the project root:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/prepare_demo.py analyze --case slow unavailable rollout startup tls backlog --live --resume
+~~~
+
+This keeps completed attempts for review and continues missing, failed or interrupted attempts. A completed but rejected report needs an explicit new attempt, for example `analyze --case tls --live --retry`. Every earlier attempt remains saved; resume does not imply acceptance or rewrite the published bundle. Retain `.cache/phase8/v1` to keep local preparation progress.
+
+To pause either demo preparation or the benchmark, run this in a second terminal:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/prepare_demo.py pause
+~~~
+
+The current attempt finishes and is saved before the next one is stopped. Rerun the resume command to continue. Ctrl+C interrupts the current attempt and retains its partial result when graceful cleanup can run; forcibly closing the process may leave a lock that needs inspection. Only one provider workload may run at once.
+
 Detailed setup, planning and progress documents remain local and are excluded from Git; this README is the published guide. SQLAlchemy/OpenTelemetry adoption and additional connectors remain later backlog work. This launcher binds to loopback and is intended for local use.
 
 ## Import your application logs
@@ -93,7 +111,7 @@ Limits are 1 MiB of text, 5,000 observations, 32 services and 32 KiB per observa
 
 Review the retained observations before clicking **Investigate**, which sends bounded evidence to OpenRouter Jev and Groq. Common credential patterns are redacted, but arbitrary sensitive content may remain. Groq uses bounded tools and request budgets; its citations refer only to supplied saved evidence.
 
-Raw evidence is paged and searchable separately from report sources. Identical imports return the existing collection; new investigations retain earlier attempts. Legacy scenario reports and supplements remain available. SQLite migration 3 adds collections and relaxes the required legacy run/incident links transactionally while preserving stored IDs and report fields.
+Raw evidence is paged and searchable separately from report sources. Identical imports return the existing collection; new investigations retain earlier attempts. Legacy scenario reports and supplements remain available. PostgreSQL migration preserves their original serialized fields, IDs and timestamps.
 
 For browser verification, use [examples/import-check.jsonl](examples/import-check.jsonl), an artificial test fixture. Expected coverage: **4 observations, 1 duplicate skipped, 1 missing timestamp and 1 redaction**. No analysis should start automatically. Open the auth observation to inspect redaction, click Investigate explicitly, inspect triage and cited previews, then sign out/in and revisit the saved result. Investigation consumes configured provider quota.
 
@@ -130,7 +148,7 @@ Jev classifies up to eight representative observation groups across 16 problem f
 
 Jev has a 10 KiB complete-input limit and at most two HTTP attempts within 20 seconds. Its waiting counts toward the investigation's shared 120-second waiting allowance and five-minute deadline. Jev attempts/tokens/cost are recorded separately from Groq's six-attempt budget. Its advisory context uses spare request capacity; it never evicts evidence. If even a compact hint cannot fit, diagnostics disclose its omission.
 
-The investigator first collects a bounded cross-service baseline, including later metric windows for long collections, then lets Groq query further. Logs, metrics and spans default to 20 records (maximum 50); account, run, service, trace and inclusive time-window filters apply before limits. Original observations remain intact in SQLite. Repeated observations use cited representatives, queried trace relationships are kept together, and the prompt discloses omitted groups. Linked timing comparisons are calculations from supplied telemetry, not a rule-generated diagnosis.
+The investigator first collects a bounded cross-service baseline, including later metric windows for long collections, then lets Groq query further. Logs, metrics and spans default to 20 records (maximum 50); account, run, service, trace and inclusive time-window filters apply before limits. Original observations remain intact in PostgreSQL. Repeated observations use cited representatives, queried trace relationships are kept together, and the prompt discloses omitted groups. Linked timing comparisons are calculations from supplied telemetry, not a rule-generated diagnosis.
 
 For trace-linked imported exceptions, the baseline reads one matching trace and its logs/error events. Later trace selections also collect matching logs. Exception handling, span operation and HTTP status stay available to the report; an HTTP server response is distinct from a downstream response. Independent successful requests remain separate observations. Sentry normalization version 2 keeps project provenance separate from `service.name`; older snapshots need a fresh import for corrected metadata. Their saved evidence, reports, citations and timestamps are preserved.
 
@@ -150,11 +168,46 @@ Open a saved investigation to inspect its hypotheses, individual citations and e
 
 Completed Groq reports offer **Analyze further**. This explicit action reviews the same saved evidence and adds a separate supplement; it makes no telemetry queries and preserves the original report/status/timestamps. Opening or revisiting reports never calls Groq. Supplements can support, qualify, disagree with or be unable to assess the original conclusion. Inspect their citations and limitations; valid source IDs alone do not guarantee correct prose.
 
-The single worker prioritizes fresh investigations over queued supplements. Each supplement has two HTTP attempts at most, a 10 KiB complete request, 2,048 output tokens and the same 120-second waiting/five-minute execution bounds. Original and supplemental usage are shown separately. Duplicate submissions return the existing result; explicit retry after failure/interruption retains the previous attempt. SQLite migration 2 adds separate supplement storage without rewriting original reports.
+The single worker prioritizes fresh investigations over queued supplements. Each supplement has two HTTP attempts at most, a 10 KiB complete request, 2,048 output tokens and the same 120-second waiting/five-minute execution bounds. Original and supplemental usage are shown separately. Duplicate submissions return the existing result; explicit retry after failure/interruption retains the previous attempt.
 
 ## Fresh installation
 
 Use Python 3.14 and a Node version compatible with Vite 7. The versions exercised here were Python 3.14.6 and Node 26.7.0.
+
+Configure `DESK_DATABASE_URL` for a Neon development project before starting. Integration tests and operator preparation require `DESK_TEST_DATABASE_URL` on a separate project. Keep both URLs in ignored `backend/.env` or backend environment variables. The application strengthens Neon TLS to `verify-full`; the default pool holds at most five connections per process. There is no SQLite fallback.
+
+## Migrate an existing SQLite installation
+
+Keep the previous application version, frontend build, encryption keys and SQLite database together as a rollback backup. Rehearse the transfer on the separate test project first:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/migrate_platform.py backup --source data/platform.sqlite3 --output .cache/migration-rehearsal.sqlite3
+.\.venv\Scripts\python.exe scripts/migrate_platform.py rehearse --source .cache/migration-rehearsal.sqlite3 --output .cache/migration-rehearsal.json
+~~~
+
+The rehearsal retains a dedicated operator schema and compares every original field, record count and relationship. After it passes, stop the application, pause all other writers, and take a fresh backup. The working PostgreSQL target must be empty:
+
+~~~powershell
+.\.venv\Scripts\python.exe -m backend.launcher --stop
+.\.venv\Scripts\python.exe scripts/migrate_platform.py backup --source data/platform.sqlite3 --output .cache/migration-cutover.sqlite3
+.\.venv\Scripts\python.exe scripts/migrate_platform.py cutover --source .cache/migration-cutover.sqlite3 --output .cache/migration-cutover.json --writes-paused
+npm run build
+.\start.ps1
+~~~
+
+Wait for shutdown before taking the cutover backup. Use new backup filenames for subsequent rehearsals. Verify existing sign-in, saved evidence, citations, demo access and restart persistence before considering cutover complete. The transfer refuses to overwrite existing PostgreSQL records. Before new PostgreSQL writes, rollback can restore the retained previous application and its SQLite backup. After new writes, stop and preserve both stores for reconciliation; starting the old SQLite application would lose those new changes. This version never silently falls back to SQLite.
+
+## Account email setup
+
+Verify `mail.tracedesk.nishantraj.me` in Resend and configure `RESEND_API_KEY`, `DESK_PUBLIC_URL` and the retained encryption key from [.env.example](.env.example). Messages use `TraceDesk <notifications@mail.tracedesk.nishantraj.me>` with replies to `yournishantraj@gmail.com`; a purchased mailbox is unnecessary. Disable click and open tracking for authentication messages. The encrypted delivery queue runs with the backend and retries at most five times using stable Resend idempotency keys.
+
+`DESK_PUBLIC_URL` is the frontend HTTPS origin used in email links. An active local HTTPS tunnel can be used before deployment; no particular temporary tunnel hostname is required. Phase 11 will set it to `https://tracedesk.nishantraj.me`, with the API hosted on Render at `https://api.tracedesk.nishantraj.me`.
+
+Add a Resend webhook for `email.sent`, `email.delivered`, `email.delivery_delayed`, `email.failed`, `email.bounced` and `email.complained`. Its final URL is **`https://api.tracedesk.nishantraj.me/api/email/webhook`**; local testing uses the current backend tunnel origin followed by `/api/email/webhook`. Save the endpoint's signing secret in `RESEND_WEBHOOK_SECRET` and restart the backend. Sending works without this secret, but delivery receipts cannot be authenticated until it is configured. Receipts never verify accounts or change passwords.
+
+Existing accounts retain their passwords and saved history; migration sends no bulk mail. Unverified regular accounts sign in to a dedicated verification screen with resend, check-verification and sign-out controls. Verification is sent on signup or explicit request and requires an explicit confirmation within 24 hours. Password reset links expire after 30 minutes, change the password only after submission, revoke existing sessions and establish email ownership. Reset rejects the current password without consuming the link. Password fields have show/hide controls. Recovery offers a registration link for new users while returning the same response for registered, unknown and demo addresses. Both email flows use single-use tokens submitted through POST; the frontend clears link tokens from the address bar. Reopening a used link can display its form, but another submission is rejected. Demo Account remains read-only and cannot use recovery to change its public identity.
+
+## Install dependencies
 
 ~~~powershell
 py -3.14 -m venv .venv
@@ -182,17 +235,17 @@ npm test
 npm run build
 ~~~
 
-November 6 verification passed **123 backend tests**, **19 frontend checks** and the production build. A final focused run passed all **24 Sentry tests**, including diagnostic facts within the 4 KiB tool-result and 10 KiB complete-request limits. The dedicated Sentry app's three errors, twelve logs and twelve spans were retrieved with corrected service identity; live JWT refresh and versioned import deduplication passed. Existing collections, evidence, reports and supplements passed the history-preservation audit.
+The PostgreSQL migration rehearsal and working cutover matched all 18 original tables exactly. Post-cutover checks verified unchanged historical content, TLS, all six published reports and cited sources, account isolation and demo browsing without provider calls. All 144 backend tests have passing results across the full run and targeted reruns. The initial full run exposed development-lab write latency and encountered database connection failures; batching fixed the lab issue, and affected tests subsequently passed. Twenty-three frontend tests and the production build passed. The user confirmed verification/reset email delivery and reports the account/browser flows working; automated rendered/accessibility checks were unavailable. Live Resend delivery-receipt verification awaits the webhook signing secret.
 
 The latest live Jev/Groq report correctly identifies a handled integer-parsing `ValueError` in `record-processor`, its linked server HTTP 422 response and a separate HTTP 200 request. Its citations support the failure mechanism without inventing another service or claiming recovery. Earlier rejected reports remain unchanged. Broader evaluation in Phase 10 must still address redundant recommendations, unrelated deadline caveats and wording that confuses selected evidence with the full snapshot.
 
 Jev tests cover strict response validation, input/redaction bounds, retries/deadlines, fallback, separate usage, saved results, ownership and preservation of evidence when advisory hints are added. Live OpenRouter Jev and four frozen Jev/Groq/combined comparisons completed. The earlier reliability milestone also passed two live original reports per failure mechanism and explicit supplement flows.
 
-Backend tests start a separate real four-process runtime on ports 8765-8768 with isolated storage under `.cache`. They cover authentication, CSRF, account isolation, both real failure scenarios, healthy traffic, recovery, trace/time filtering before limits, grouped evidence, request-size bounds, citation integrity, quota resumption and budgets, queue limits, restart handling and saved results. Mocked provider checks consume no Groq quota.
+Backend tests require network access to `DESK_TEST_DATABASE_URL` and create disposable schemas on the separate test project. Runtime checks start four local processes on ports 8765–8768; reference workload files live under `.cache`. They cover authentication, CSRF, account isolation, real failure scenarios, healthy traffic, recovery, evidence limits, citations, quota handling, restart and saved results. Mocked provider checks consume no Groq quota.
 
-Frontend checks cover TypeScript compilation, API CSRF/error handling, imports, triage/fallback rendering, source previews, saved-report states, Sentry regions and coverage/provenance/older-import labels. The user confirmed Phase 9 browser checks, including sign-in and retained-report retrieval, local disconnect, reauthorization and Sentry uninstall. A real signed uninstall notification and a later installation notification were received. Final connection restoration still needs reconciliation: the user reported a successful reconnect, but the last database check showed both connections disconnected. Phase 8 interactive/visual acceptance remains separate. Browser results are user-verified because the automation host is unavailable.
+Frontend checks cover TypeScript compilation, API handling, imports, triage/fallback rendering, sources, saved reports, Sentry metadata and account-link states. The user confirmed Phase 9 browser checks, including disconnect, reauthorization and uninstall. The latest EU connection is connected with no recorded access error (checked November 6 at 08:40 UTC). User browser reports remain distinct from automated rendering evidence.
 
-Local Phase 9 acceptance permits Phase 10 password recovery, broader accuracy evaluation and outstanding demo acceptance. External Sentry acceptance follows Phase 11 deployment of React on **Vercel** and Python on **Render**, with persistent SQLite and verified HTTPS sessions. Hosted callback/webhook verification, Sentry **Publish** submission, approval and second-organization isolation remain explicitly pending. Submission is not approval. Automatic Sentry investigations remain Phase 12.
+External Sentry acceptance follows Phase 11 deployment of React on **Vercel** at `tracedesk.nishantraj.me` and Python on **Render** at `api.tracedesk.nishantraj.me`, with Neon PostgreSQL and verified HTTPS sessions. Hosted callback/webhook verification, Sentry submission/approval and second-organization isolation remain pending. Automatic investigations and incident emails remain Phase 12.
 
 Run an explicit live Jev probe:
 
@@ -209,7 +262,19 @@ Freeze a comparison input without making provider requests, then explicitly comp
 
 For `pool`, `slow` or `incomplete`, supply `--source PATH_TO_LIVE_CHECK_JSON` when first freezing a case. `incomplete` retains only Gateway/Order logs. Modes are `jev`, `groq`, `combined` and `all`. Snapshots are hashed and retained under `.cache/phase7/comparison/`; evaluation databases are isolated from normal app data. Run live jobs sequentially using the same configured accounts. `--live` and the Jev probe consume provider quota.
 
-The four-case review establishes working integration, not improved accuracy. Jev selected plausible problem families, but both Groq and combined reports made unsupported causal claims for incomplete evidence and invented relationships for disconnected imported logs. HTTP-hop wording and unqualified retry/pool-resizing advice also need review. Initial pool/slow combined attempts omitted advice for lack of space; retained reruns include it without evicting sources. All structured citation IDs resolved, which does not establish semantic support. Quota waits and some overlapping early invocations prevent a fair latency comparison. The broader quality benchmark remains future work.
+The four-case review establishes working integration, not improved accuracy. Jev selected plausible problem families, but both Groq and combined reports made unsupported causal claims for incomplete evidence and invented relationships for disconnected imported logs. HTTP-hop wording and unqualified retry/pool-resizing advice also need review. Initial pool/slow combined attempts omitted advice for lack of space; retained reruns include it without evicting sources. All structured citation IDs resolved, which does not establish semantic support. Quota waits and some overlapping early invocations prevent a fair latency comparison.
+
+The separate Phase 10 benchmark freezes twelve cases: two pool, two slow, four healthy/noisy and four ambiguous/incomplete. It compares an initial-snapshot report, Groq with tools and the same investigator with Jev. Run it explicitly:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/evaluate_accuracy.py freeze
+.\.venv\Scripts\python.exe scripts/evaluate_accuracy.py run --live
+.\.venv\Scripts\python.exe scripts/evaluate_accuracy.py summary
+~~~
+
+Evidence and the investigator implementation are pinned under `.cache/phase10/benchmark-v1`; operator expectations never enter model inputs. Live runs require the separate test target, share the demo-preparation lock, stop on provider cooldown and skip retained attempts. Pause with `scripts/evaluate_accuracy.py pause`, then rerun `scripts/evaluate_accuracy.py run --live` to continue from the next unattempted mode/case. `--retry` retains an additional attempt without replacing the first. Source-based semantic scores are recorded with `review --attempt PATH --scores PATH`; every citation must be assessed. Summaries retain failed and unreviewed results, actual usage, calls, latency and storage-version caveats.
+
+The benchmark is paused at the user's request because of provider quota limits: 18 of 36 first attempts are retained, with nine completed reports and nine failures. All nine reports have source-based reviews, including incorrect HTTP attribution, mixed request traces, unsupported advice and appropriate healthy-case abstention. The remaining 18 attempts are pending; no accuracy benefit from Jev is claimed.
 
 Run a live check explicitly, one investigation per invocation (these consume available free Groq quota):
 
@@ -221,11 +286,12 @@ Run a live check explicitly, one investigation per invocation (these consume ava
 .\.venv\Scripts\python.exe scripts/live_check.py slow --supplement
 ~~~
 
-The script creates a local verification account with its password kept only in memory. It runs real service traffic, polls progress, signs back in, verifies saved results and all structured citations through the protected API, and writes report/evidence/diagnostic artifacts under `.cache/live-verification/`. `--supplement` explicitly requests one supplement after the original Groq report and verifies that both can be revisited. Every invocation uses the server's same configured Groq account. Healthy checks make no model call. Review the reported mechanism against the evidence; valid citation IDs alone do not establish semantic correctness.
+The script requires `DESK_TEST_DATABASE_URL` and starts its own isolated development lab on free loopback ports. It creates a verified fixture account only in a new operator schema on the separate test project; its password stays in memory and email delivery is disabled. It runs real service traffic, polls progress, signs back in, verifies saved results and all structured citations through the protected API, and retains the schema and report/evidence/diagnostic artifacts under `.cache/live-verification/`. `--supplement` explicitly requests one supplement after the original Groq report and verifies that both can be revisited. Every invocation uses the same configured Groq account. Healthy checks make no model call. Review the reported mechanism against the evidence; valid citation IDs alone do not establish semantic correctness.
 
 ## Storage and files
 
-- `data/platform.sqlite3`: accounts, session digests, runs, incidents, evidence collections, observations, investigations and supplements.
+- PostgreSQL: accounts/security, sessions, imports/connections, evidence, reports, demo relationships and email delivery records.
+- `data/platform.sqlite3`: retained legacy platform database; keep it as a migration backup, not an automatic fallback.
 - `data/payment.sqlite3`: reference-service workload.
 - `data/telemetry/`: captured JSONL service observations.
 - `data/*.log`: process diagnostics.
@@ -233,7 +299,7 @@ The script creates a local verification account with its password kept only in m
 - `src/`: React application.
 - `tests/`: isolated backend integration and frontend contract checks.
 
-Local data, dependencies and secrets are ignored by [.gitignore](.gitignore). Stop the runtime before making a backup; retain the platform database and telemetry together. This POC has no verified hosted backup/restore workflow.
+Local data, dependencies and secrets are ignored by [.gitignore](.gitignore). Retain database backups, telemetry and encryption keys together. Hosted PostgreSQL backup/restore remains Phase 11 work. Evidence is never automatically deleted to remain under free-plan limits.
 
 Detailed progress and working notes are maintained locally and are not included in the repository.
 

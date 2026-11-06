@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowUpRight, Play, ShieldCheck, Square } from 'lucide-react
 import { api, ApiError, type CollectionDetail, type DemoCase, type Evidence, type EvidencePage, type Run, type Scenario, type Detail, type Incident } from './api'
 import { ReportView, EvidenceTable, ServiceMap } from './App'
 import { FullTime, useReportEvidence } from './reports'
+import { poll } from './poll'
 
 const active = ['starting', 'running', 'resetting']
 const working = ['queued', 'running', 'quota_waiting']
@@ -147,9 +148,8 @@ export function ScenarioWorkspace(props: Props) {
     let cancelled = false
     api<Scenario[]>('/scenarios').then(value => { if (!cancelled) setCatalog(value) }).catch(props.onError)
     const refresh = () => api<Run[]>('/runs').then(value => { if (!cancelled) { setRuns(value); setSelected(current => current || value[0]?.id || '') } }).catch(e => { if (!cancelled) { setError(e.message); props.onError(e) } })
-    void refresh()
-    const timer = setInterval(refresh, 2000)
-    return () => { cancelled = true; clearInterval(timer) }
+    const stop = poll(refresh, 2000)
+    return () => { cancelled = true; stop() }
   }, [])
   const run = runs.find(item => item.id === selected)
   const running = !!run && active.includes(run.state)

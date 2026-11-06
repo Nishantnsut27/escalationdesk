@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import re
 import secrets
-import sqlite3
 import time
 from collections import defaultdict, deque
 from argon2 import PasswordHasher
@@ -22,35 +21,48 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 def public_user(row):
-    role = db.one("SELECT role FROM account_roles WHERE user_id=?", (row["id"],))
+    security = row if '_role' in row else db.one("SELECT r.role _role,s.verified_at _verified FROM users u LEFT JOIN account_roles r ON r.user_id=u.id LEFT JOIN account_security s ON s.user_id=u.id WHERE u.id=%s", (row['id'],))
+    role = security['_role']
     return {**{key: row[key] for key in ("id", "name", "email")},
-            "role": "demo" if role else "regular", "read_only": bool(role)}
+            "role": "demo" if role else "regular", "read_only": bool(role),
+            "email_verified": bool(role or security['_verified'])}
+
+
+def require_verified(user):
+    if is_demo(user):
+        raise HTTPException(403, "Demo Account is read-only.")
+    verified = user['_verified'] if '_verified' in user else db.one("SELECT verified_at FROM account_security WHERE user_id=%s AND verified_at IS NOT NULL", (user["id"],))
+    if not verified:
+        raise HTTPException(403, "Verify your email before connecting Sentry, importing evidence or investigating. Your saved history remains accessible.")
 
 def is_demo(user):
-    return bool(db.one("SELECT role FROM account_roles WHERE user_id=?", (user["id"],)))
+    return bool(user['_role']) if '_role' in user else bool(db.one("SELECT role FROM account_roles WHERE user_id=%s", (user["id"],)))
 
 async def demo_login(request):
     from .demo import DEMO_ID, ready
     throttle(request)
     data = await body(request)
     password = data.get("password", "")
-    user = db.one("SELECT * FROM users WHERE id=?", (DEMO_ID,))
+    user = await asyncio.to_thread(db.one, "SELECT * FROM users WHERE id=%s", (DEMO_ID,))
     if not isinstance(password, str) or len(password) > 128:
         raise HTTPException(401, "Demo password is incorrect.")
-    if not ready():
+    if not await asyncio.to_thread(ready):
         raise HTTPException(503, "The recorded demo is not installed yet. Regular accounts remain available.")
     try:
         await asyncio.to_thread(hasher.verify, user["password_hash"], password)
     except VerificationError:
         raise HTTPException(401, "Demo password is incorrect.")
-    return session_response(user, request.cookies.get(COOKIE, ""))
+    return await asyncio.to_thread(session_response,user,request.cookies.get(COOKIE,""))
 
 def current(request):
+    if hasattr(request.state,'authenticated_user'):
+        return request.state.authenticated_user
     token = request.cookies.get(COOKIE, "")
-    row = db.one("SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE digest=? AND expires>?",
+    row = db.one("SELECT users.*,r.role _role,s.verified_at _verified FROM sessions JOIN users ON users.id=sessions.user_id LEFT JOIN account_roles r ON r.user_id=users.id LEFT JOIN account_security s ON s.user_id=users.id WHERE digest=%s AND expires>%s",
                  (digest(token), time.time()))
     if not row:
         raise HTTPException(401, "Sign in to continue.")
+    request.state.authenticated_user = row
     return row
 
 def csrf(request):
@@ -84,8 +96,13 @@ def throttle(request):
 
 def session_response(user, old_token=""):
     token = secrets.token_urlsafe(32)
-    db.execute("DELETE FROM sessions WHERE digest=? OR expires<?", (digest(old_token), time.time()))
-    db.execute("INSERT INTO sessions VALUES(?,?,?)", (digest(token), user["id"], time.time() + 86400))
+    with db.connection() as conn:
+        db.lock(conn,"auth-token-consumption")
+        current_user = conn.execute("SELECT password_hash FROM users WHERE id=%s", (user["id"],)).fetchone()
+        if "password_hash" in user and current_user["password_hash"] != user["password_hash"]:
+            raise HTTPException(401, "Your password changed. Sign in again.")
+        conn.execute("DELETE FROM sessions WHERE digest=%s OR expires<%s", (digest(old_token), time.time()))
+        conn.execute("INSERT INTO sessions VALUES(%s,%s,%s)", (digest(token), user["id"], time.time() + 86400))
     response = JSONResponse({"user": public_user(user), "csrf": digest(token + ":csrf")})
     # OAuth returns through a top-level GET; CSRF still protects every ordinary write.
     response.set_cookie(COOKIE, token, max_age=86400, httponly=True, samesite="lax" if PUBLIC_URL else "strict", secure=bool(PUBLIC_URL), path="/")
@@ -103,12 +120,14 @@ async def signup(request):
     if not isinstance(password, str) or not 10 <= len(password) <= 128:
         raise HTTPException(400, "Use a password between 10 and 128 characters.")
     password_hash = await asyncio.to_thread(hasher.hash, password)
-    user = {"id": db.uid(), "name": name, "email": email}
+    user = {"id": db.uid(), "name": name, "email": email, "password_hash": password_hash}
     try:
-        db.execute("INSERT INTO users VALUES(?,?,?,?,?)", (user["id"], name, email, password_hash, db.now()))
-    except sqlite3.IntegrityError:
+        await asyncio.to_thread(db.execute, "INSERT INTO users VALUES(%s,%s,%s,%s,%s)", (user["id"], name, email, password_hash, db.now()))
+    except db.IntegrityError:
         raise HTTPException(409, "Unable to create this account. Try signing in.")
-    return session_response(user, request.cookies.get(COOKIE, ""))
+    from .account_email import issue
+    await asyncio.to_thread(issue,user,"verify")
+    return await asyncio.to_thread(session_response,user,request.cookies.get(COOKIE,""))
 
 async def login(request):
     throttle(request)
@@ -117,25 +136,25 @@ async def login(request):
     password = data.get("password", "")
     if not isinstance(password, str) or len(password) > 128:
         raise HTTPException(401, "Email or password is incorrect.")
-    user = db.one("SELECT * FROM users WHERE email=?", (email,))
+    user = await asyncio.to_thread(db.one, "SELECT * FROM users WHERE email=%s", (email,))
     try:
         await asyncio.to_thread(hasher.verify, user["password_hash"] if user else dummy_hash, password)
     except VerificationError:
         raise HTTPException(401, "Email or password is incorrect.")
     if not user:
         raise HTTPException(401, "Email or password is incorrect.")
-    return session_response(user, request.cookies.get(COOKIE, ""))
+    return await asyncio.to_thread(session_response,user,request.cookies.get(COOKIE,""))
 
-async def me(request):
+def me(request):
     user = current(request)
     response = JSONResponse({"user": public_user(user), "csrf": digest(request.cookies[COOKIE] + ":csrf")})
     response.headers["Cache-Control"] = "no-store"
     return response
 
-async def logout(request):
+def logout(request):
     current(request)
     csrf(request)
-    db.execute("DELETE FROM sessions WHERE digest=?", (digest(request.cookies.get(COOKIE, "")),))
+    db.execute("DELETE FROM sessions WHERE digest=%s", (digest(request.cookies.get(COOKIE, "")),))
     response = JSONResponse({"ok": True})
     response.delete_cookie(COOKIE, path="/")
     return response

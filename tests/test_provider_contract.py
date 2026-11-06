@@ -34,6 +34,21 @@ def success(body, tools=False):
                                     "choices": [{"message": message, "finish_reason": "stop"}]})
 
 class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_snapshot_has_no_model_followup_tools(self):
+        calls=[]
+        def respond(request):
+            payload=json.loads(request.content)
+            calls.append(payload)
+            self.assertNotIn('tools',payload)
+            self.assertIn('response_format',payload)
+            return success(payload)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with patch('backend.investigator.GROQ_KEY','fixture-key'):
+                _,usage=await Investigator(client).groq(FixtureTools(),lambda *args:None,snapshot_only=True)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(usage['requests'],1)
+        self.assertIn('initial snapshot',usage['query_mode'])
+
     async def run_provider(self, respond, usage=None, tools=None, quota=None, progress=None):
         self.clock = Clock() if quota is None else None
         quota = quota or GroqQuota(clock=self.clock, sleep=self.clock.sleep)

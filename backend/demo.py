@@ -17,12 +17,17 @@ def digest(value):
 
 def ready():
     return bool(case_count() and db.one(
-        "SELECT 1 FROM users JOIN account_roles ON users.id=account_roles.user_id WHERE users.id=? AND role='demo'",
+        "SELECT 1 FROM users JOIN account_roles ON users.id=account_roles.user_id WHERE users.id=%s AND role='demo'",
         (DEMO_ID,)))
 
 
 def case_count():
     return db.one("SELECT COUNT(*) n FROM demo_cases")["n"]
+
+
+def availability():
+    row = db.one("SELECT COUNT(*) n, EXISTS(SELECT 1 FROM users u JOIN account_roles r ON u.id=r.user_id WHERE u.id=%s AND r.role='demo') identity_ready FROM demo_cases", (DEMO_ID,))
+    return {"demo_available": bool(row['n'] and row['identity_ready']), "demo_case_count": row['n']}
 
 
 def validate(bundle):
@@ -71,8 +76,8 @@ def install(path=BUNDLE):
     bundle = json.loads(path.read_text(encoding="utf-8"))
     checksum = validate(bundle)
     with db.connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        previous = conn.execute("SELECT digest FROM demo_datasets WHERE version=?", (bundle["version"],)).fetchone()
+        db.lock(conn)
+        previous = conn.execute("SELECT digest FROM demo_datasets WHERE version=%s", (bundle["version"],)).fetchone()
         if previous:
             if previous["digest"] == checksum:
                 return True
@@ -81,28 +86,27 @@ def install(path=BUNDLE):
                 if supplied.get(row["slug"]) != json.loads(row["metadata"]).get("case_digest"):
                     raise ValueError("An installed demo cannot be removed or rewritten by a bundle update.")
         else:
-            if conn.execute("SELECT 1 FROM users WHERE id=? OR email=?", (DEMO_ID, "demo@escalationdesk.invalid")).fetchone():
+            if conn.execute("SELECT 1 FROM users WHERE id=%s OR email=%s", (DEMO_ID, "demo@escalationdesk.invalid")).fetchone():
                 raise ValueError("Reserved demo identity conflicts with an existing account.")
-            conn.execute("INSERT INTO users VALUES(?,?,?,?,?)", (DEMO_ID, "Demo Account", "demo@escalationdesk.invalid", hasher.hash("Demo@login"), db.now()))
-            conn.execute("INSERT INTO account_roles VALUES(?, 'demo')", (DEMO_ID,))
-            conn.execute("INSERT INTO demo_datasets VALUES(?,?,?)", (bundle["version"], checksum, db.now()))
+            conn.execute("INSERT INTO users VALUES(%s,%s,%s,%s,%s)", (DEMO_ID, "Demo Account", "demo@escalationdesk.invalid", hasher.hash("Demo@login"), db.now()))
+            conn.execute("INSERT INTO account_roles VALUES(%s, 'demo')", (DEMO_ID,))
+            conn.execute("INSERT INTO demo_datasets VALUES(%s,%s,%s)", (bundle["version"], checksum, db.now()))
         for position, case in enumerate(bundle["cases"]):
-            if conn.execute("SELECT 1 FROM demo_cases WHERE slug=?", (case["slug"],)).fetchone():
+            if conn.execute("SELECT 1 FROM demo_cases WHERE slug=%s", (case["slug"],)).fetchone():
                 continue
             collection, investigation = case["collection"], case["investigation"]
-            conn.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+            conn.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                 (collection["id"], DEMO_ID, case["title"], collection["symptom"], "recorded_demo", collection["created_at"], case["evidence_digest"], json.dumps(collection["summary"])))
-            for row in case["evidence"]:
-                conn.execute("INSERT INTO evidence(id,collection_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)",
-                    (row["id"], collection["id"], DEMO_ID, row["kind"], row["service"], row.get("timestamp"), json.dumps(row)))
-            conn.execute("INSERT INTO investigations(id,collection_id,user_id,engine,state,created_at,completed_at,report,activity,usage) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            with conn.cursor() as cursor:
+                cursor.executemany("INSERT INTO evidence(id,collection_id,user_id,kind,service,timestamp,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    [(row["id"], collection["id"], DEMO_ID, row["kind"], row["service"], row.get("timestamp"), json.dumps(row)) for row in case["evidence"]])
+            conn.execute("INSERT INTO investigations(id,collection_id,user_id,engine,state,created_at,completed_at,report,activity,usage) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (investigation["id"], collection["id"], DEMO_ID, "groq", "completed", investigation["created_at"], investigation["completed_at"],
                  json.dumps(investigation["report"]), json.dumps(investigation["activity"]), json.dumps(investigation["usage"])))
             metadata = {key: case[key] for key in ("slug", "title", "description", "category")}
             metadata.update(version=bundle["version"], case_digest=digest(case), recorded_at=collection["created_at"], collection_id=collection["id"], investigation_id=investigation["id"],
                             counts={kind: sum(row["kind"] == kind for row in case["evidence"]) for kind in ("log", "span", "metric")})
-            conn.execute("INSERT INTO demo_cases VALUES(?,?,?,?,?,?)", (case["slug"], bundle["version"], position, json.dumps(metadata), collection["id"], investigation["id"]))
-        conn.execute("UPDATE demo_datasets SET digest=? WHERE version=?", (checksum, bundle["version"]))
-        if conn.execute("PRAGMA foreign_key_check").fetchall():
-            raise ValueError("Demo installation failed relationship validation.")
+            conn.execute("INSERT INTO demo_cases VALUES(%s,%s,%s,%s,%s,%s)", (case["slug"], bundle["version"], position, json.dumps(metadata), collection["id"], investigation["id"]))
+        conn.execute("UPDATE demo_datasets SET digest=%s WHERE version=%s", (checksum, bundle["version"]))
+        conn.execute("SET CONSTRAINTS ALL IMMEDIATE")
     return True

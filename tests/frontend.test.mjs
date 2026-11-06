@@ -18,6 +18,42 @@ const reportFixture = { assessment: 'inconclusive', origin: 'payment', summary: 
   hypotheses: [{ claim: 'Processing may be delayed.', evidence_ids: ['source-b'] }], recommendations: ['Inspect linked spans.'], limitations: ['Deeper cause unknown.'] }
 const investigationFixture = { id: 'saved', engine: 'groq', state: 'completed', created_at: '2026-11-02T00:00:05Z', completed_at: '2026-11-02T00:00:09Z', report: reportFixture, activity: [], usage: { requests: 2, total_tokens: 200 }, supplements: [] }
 
+test('authentication links require explicit action and keep tokens out of rendered markup', async () => {
+  const { AccountPage, parseAuthenticationLink } = await components('src/account.tsx')
+  const token = 'token_'.repeat(7)
+  assert.deepEqual(parseAuthenticationLink('#auth/verify/' + token), { purpose: 'verify', token })
+  for (const invalid of ['#auth/verify/short', '#auth/reset/' + token + '?query=1', '#auth/other/' + token]) assert.equal(parseAuthenticationLink(invalid), null)
+  const html = renderToStaticMarkup(createElement(AccountPage, { link: { purpose: 'verify', token }, onExit() {} }))
+  assert.match(html, /Confirm email address/)
+  assert.doesNotMatch(html, new RegExp(token))
+  assert.match(renderToStaticMarkup(createElement(AccountPage, { invalid: true, onExit() {} })), /This link is invalid/)
+})
+
+test('verification banner preserves history guidance and stays hidden for demo accounts', async () => {
+  const { VerificationBanner } = await components('src/account.tsx')
+  const user = { id: 'regular', email: 'owner@example.test', name: 'Owner', email_verified: false, read_only: false }
+  const html = renderToStaticMarkup(createElement(VerificationBanner, { user, onRefresh() {} }))
+  assert.match(html, /Your saved history is retained/)
+  assert.match(html, /Send verification email/)
+  assert.equal(renderToStaticMarkup(createElement(VerificationBanner, { user: { ...user, read_only: true }, onRefresh() {} })), '')
+})
+
+test('account access offers password visibility, registration and a dedicated verification screen', async () => {
+  const { PasswordField, AccountPage, VerifyAccountPage } = await components('src/account.tsx')
+  const password = renderToStaticMarkup(createElement(PasswordField, { label: 'New password', name: 'password' }))
+  assert.match(password, /type="password"/)
+  assert.match(password, /aria-label="Show new password"/)
+  assert.match(password, /type="button"/)
+  const recovery = renderToStaticMarkup(createElement(AccountPage, { onExit() {}, onRegister() {} }))
+  assert.match(recovery, /Create account/)
+  assert.match(recovery, /Password recovery is for existing accounts/)
+  const verification = renderToStaticMarkup(createElement(VerifyAccountPage, {
+    user: { email: 'owner@example.test', email_verified: false, read_only: false }, onRefresh() {}, onLogout() {} }))
+  assert.match(verification, /Verify your email to continue/)
+  assert.match(verification, /Send verification email/)
+  assert.doesNotMatch(verification, /class="app-shell"/)
+})
+
 test('demo reports expose saved sources without supplement creation', async () => {
   const { ReportView } = await components('src/App.tsx')
   const html = renderToStaticMarkup(createElement(ReportView, { investigation: investigationFixture, readOnly: true, onOpen() {} }))
@@ -196,7 +232,28 @@ test('API client rejects non-success responses and sends CSRF on writes', async 
     assert.equal(captured.path, '/api/scenarios/pool/start')
     assert.equal(captured.options.headers['X-CSRF-Token'], 'test-csrf')
     assert.equal(captured.options.credentials, 'same-origin')
+    globalThis.fetch = async () => new Response('Internal Server Error', { status: 500 })
+    await assert.rejects(module.api('/auth/verification-confirmation', { token: 'test' }),
+      error => error.status === 500 && /try again shortly/i.test(error.message) && !/Unexpected token/.test(error.message))
   } finally { globalThis.fetch = originalFetch }
+})
+
+test('slow refreshes never overlap and cancellation prevents another request', async context => {
+  const { poll } = await components('src/poll.ts')
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let requests = 0, finish
+  const stop = poll(() => { requests++; return new Promise(resolve => { finish = resolve }) }, 2000)
+  context.mock.timers.tick(20000)
+  assert.equal(requests, 1)
+  finish()
+  await Promise.resolve()
+  context.mock.timers.tick(2000)
+  assert.equal(requests, 2)
+  stop()
+  finish()
+  await Promise.resolve()
+  context.mock.timers.tick(20000)
+  assert.equal(requests, 2)
 })
 
 test('import form and coverage make explicit analysis and missing context clear', async () => {

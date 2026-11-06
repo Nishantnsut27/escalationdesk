@@ -127,7 +127,7 @@ class SentryClient:
 
     async def token(self, connection_id, force=False):
         async with self.locks.setdefault(connection_id, asyncio.Lock()):
-            row = db.one("SELECT * FROM sentry_connections WHERE id=?", (connection_id,))
+            row = db.one("SELECT * FROM sentry_connections WHERE id=%s", (connection_id,))
             if not row or row["state"] != "connected" or not row["credentials"]:
                 raise SentryError("This Sentry connection is disconnected. Reconnect to import.", 401)
             tokens = unseal(row["credentials"])
@@ -143,12 +143,12 @@ class SentryClient:
                 tokens, expiry = self.valid_tokens(value)
             except SentryError as exc:
                 if exc.status in {401, 403, 404}:
-                    db.execute("UPDATE sentry_connections SET state='reconnect_required', credentials=NULL, error=? WHERE id=? AND generation=?",
+                    db.execute("UPDATE sentry_connections SET state='reconnect_required', credentials=NULL, error=%s WHERE id=%s AND generation=%s",
                                (str(exc), connection_id, row["generation"]))
                 raise
             with db.connection() as conn:
-                changed = conn.execute("UPDATE sentry_connections SET credentials=?,expires_at=? WHERE id=? AND generation=? AND state='connected'",
-                                      (seal(tokens), expiry, connection_id, row["generation"])).rowcount
+                changed = conn.execute("UPDATE sentry_connections SET credentials=%s,expires_at=%s WHERE id=%s AND generation=%s AND state='connected' RETURNING id",
+                                      (seal(tokens), expiry, connection_id, row["generation"])).fetchone()
             if not changed:
                 raise SentryError("Sentry was disconnected during authorization.", 401)
             return tokens["token"]

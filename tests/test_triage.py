@@ -1,3 +1,4 @@
+from database import IsolatedDatabase, verify_users
 import asyncio
 import json
 import tempfile
@@ -208,14 +209,15 @@ class TriageIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        patcher = patch.object(db, 'DATA', Path(directory.name))
+        patcher = IsolatedDatabase(Path(directory.name))
         patcher.start(); self.addCleanup(patcher.stop)
         db.init()
         for owner in ('alice', 'bob'):
-            db.execute('INSERT INTO users VALUES(?,?,?,?,?)', (owner, owner, owner, 'hash', db.now()))
-            db.execute('INSERT INTO sessions VALUES(?,?,?)', (auth.digest(owner), owner, time.time() + 600))
+            db.execute('INSERT INTO users VALUES(%s,%s,%s,%s,%s)', (owner, owner, owner, 'hash', db.now()))
+            db.execute('INSERT INTO sessions VALUES(%s,%s,%s)', (auth.digest(owner), owner, time.time() + 600))
         self.collection = create_collection('alice', {'content': '\n'.join(json.dumps(row) for row in context().records.values())})[0]
         self.enqueued = []
+        verify_users()
         self.app = create_app()
         self.app.state.investigator = SimpleNamespace(enqueue=self.enqueued.append)
         self.path = f'/api/collections/{self.collection}/investigations'
@@ -261,7 +263,7 @@ class TriageIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 JevTriage(client, key='key', clock=clock, sleep=clock.sleep))
             with patch('backend.investigator.GROQ_KEY', 'key'):
                 await worker.investigate(id)
-        saved = db.one('SELECT * FROM investigations WHERE id=?', (id,))
+        saved = db.one('SELECT * FROM investigations WHERE id=%s', (id,))
         usage = json.loads(saved['usage'])
         self.assertEqual(saved['state'], 'completed', saved['error'])
         self.assertEqual(calls, ['openrouter.ai', 'api.groq.com', 'api.groq.com'])
@@ -270,8 +272,8 @@ class TriageIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(usage['triage']['actual_usage']['input_tokens'], 140)
         pending = await self.submit()
         db.init()
-        self.assertEqual(db.one('SELECT * FROM investigations WHERE id=?', (id,)), saved)
-        interrupted = db.one('SELECT * FROM investigations WHERE id=?', (pending,))
+        self.assertEqual(db.one('SELECT * FROM investigations WHERE id=%s', (id,)), saved)
+        interrupted = db.one('SELECT * FROM investigations WHERE id=%s', (pending,))
         self.assertEqual(interrupted['state'], 'interrupted')
         self.assertEqual(json.loads(interrupted['usage'])['triage']['state'], 'interrupted')
 
@@ -287,7 +289,7 @@ class TriageIntegrationTests(unittest.IsolatedAsyncioTestCase):
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
                 with patch('backend.investigator.GROQ_KEY', 'key'):
                     await Investigator(client, triage=JevTriage(client, key='key')).investigate(id)
-            row = db.one('SELECT * FROM investigations WHERE id=?', (id,))
+            row = db.one('SELECT * FROM investigations WHERE id=%s', (id,))
             self.assertEqual(row['state'], 'completed', row['error'])
             usage = json.loads(row['usage'])
             if enabled:

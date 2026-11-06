@@ -13,6 +13,7 @@ MAX_RECORDS = 5000
 MAX_RECORD_BYTES = 32768
 MAX_SERVICES = 32
 SECRET_KEY = re.compile(r"(?i)(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|credentials?|private[_-]?key)")
+AUTH_LINK = re.compile(r"(?i)((?:#|%23)auth(?:/|%2f)(?:verify|reset)(?:/|%2f))[a-z0-9_-]{32,128}")
 SECRET_PAIR = re.compile(r"""(?ix)(?<![\w.-])(["']?(?:[\w.-]{0,80}(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|credential)[\w.-]{0,80})["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}\]]+)""")
 BEARER = re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
 JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
@@ -29,7 +30,7 @@ def redact(text):
     count = 0
     for pattern, replacement in (
         (PRIVATE_KEY, "[REDACTED PRIVATE KEY]"), (COOKIE_HEADER, r"\1[REDACTED]"), (BEARER, "[REDACTED AUTHORIZATION]"),
-        (JWT, "[REDACTED TOKEN]"), (URL_AUTH, r"\1[REDACTED]@"),
+        (JWT, "[REDACTED TOKEN]"), (URL_AUTH, r"\1[REDACTED]@"), (AUTH_LINK, r"\1[REDACTED]"),
         (SECRET_PAIR, r'\1"[REDACTED]"'),
     ):
         text, changed = pattern.subn(replacement, text)
@@ -254,19 +255,18 @@ def create_collection(owner, data):
     fingerprint = hashlib.sha256(json.dumps([title, symptom, filename,
         [{k: v for k, v in row.items() if k != "id"} for row in rows]], sort_keys=True).encode()).hexdigest()
     with db.connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute("SELECT id FROM collections WHERE user_id=? AND fingerprint=?", (owner, fingerprint)).fetchone()
+        db.lock(conn)
+        existing = conn.execute("SELECT id FROM collections WHERE user_id=%s AND fingerprint=%s", (owner, fingerprint)).fetchone()
         if existing:
             return existing["id"], False
         collection_id = db.uid()
-        conn.execute("INSERT INTO collections VALUES(?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO collections VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                      (collection_id, owner, title, symptom, filename, "file" if filename else "paste",
                       db.now(), fingerprint, json.dumps(summary)))
-        for row in rows:
-            payload = {k: v for k, v in row.items() if k not in {"id", "kind", "service", "timestamp"}}
-            conn.execute("""INSERT INTO evidence(id,user_id,kind,service,timestamp,payload,collection_id)
-                         VALUES(?,?,?,?,?,?,?)""", (row["id"], owner, row["kind"], row["service"],
-                         row["timestamp"], json.dumps(payload), collection_id))
+        with conn.cursor() as cursor:
+            cursor.executemany("""INSERT INTO evidence(id,user_id,kind,service,timestamp,payload,collection_id)
+                         VALUES(%s,%s,%s,%s,%s,%s,%s)""", [(row["id"], owner, row["kind"], row["service"],
+                         row["timestamp"], json.dumps({k: v for k, v in row.items() if k not in {"id", "kind", "service", "timestamp"}}), collection_id) for row in rows])
     return collection_id, True
 
 

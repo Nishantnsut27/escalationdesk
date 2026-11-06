@@ -1,6 +1,6 @@
+from database import IsolatedDatabase, verify_users
 import asyncio
 import json
-import sqlite3
 import tempfile
 import time
 import unittest
@@ -25,6 +25,13 @@ def lines(*records):
 
 
 class ParserTests(unittest.TestCase):
+    def test_account_link_tokens_are_redacted_from_imported_text(self):
+        token = "a-private-link-token_" * 2
+        rows, summary = parse_logs("INFO https://example.test/#auth/reset/" + token +
+                                   "\nINFO https://example.test/%23auth%2Fverify%2F" + token)
+        self.assertNotIn(token, json.dumps(rows))
+        self.assertGreaterEqual(summary["redactions"], 2)
+
     def test_multiline_text_and_json_keep_source_identity_and_real_times(self):
         rows, summary = parse_logs(
             '2026-11-03T10:00:00+05:30 ERROR Request failed\n'
@@ -84,14 +91,15 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        storage = patch.object(db, "DATA", Path(directory.name))
+        storage = IsolatedDatabase(Path(directory.name))
         storage.start()
         self.addCleanup(storage.stop)
         db.init()
         for owner in ("alice", "bob"):
-            db.execute("INSERT INTO users VALUES(?,?,?,?,?)", (owner, owner, owner, "hash", db.now()))
-            db.execute("INSERT INTO sessions VALUES(?,?,?)", (auth.digest(owner), owner, time.time() + 600))
+            db.execute("INSERT INTO users VALUES(%s,%s,%s,%s,%s)", (owner, owner, owner, "hash", db.now()))
+            db.execute("INSERT INTO sessions VALUES(%s,%s,%s)", (auth.digest(owner), owner, time.time() + 600))
         self.enqueued = []
+        verify_users()
         self.app = create_app()
         self.app.state.investigator = SimpleNamespace(enqueue=self.enqueued.append, enqueue_supplement=self.enqueued.append)
         config = patch("backend.api.GROQ_KEY", "fixture-key")
@@ -179,9 +187,9 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("payment", json.dumps(result["report"]).lower())
             scope = (await client.get(f"/api/investigations/{job}/evidence")).json()
             self.assertEqual(len(scope["evidence"]), 2)
-            before = db.one("SELECT * FROM investigations WHERE id=?", (job,))
+            before = db.one("SELECT * FROM investigations WHERE id=%s", (job,))
             db.init()
-            self.assertEqual(before, db.one("SELECT * FROM investigations WHERE id=?", (job,)))
+            self.assertEqual(before, db.one("SELECT * FROM investigations WHERE id=%s", (job,)))
             self.assertEqual(len((await client.get(f"/api/collections/{id}")).json()["investigations"]), 1)
 
     async def test_combined_job_limit_duplicates_and_retained_retry(self):
@@ -191,15 +199,15 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(one.json()["id"], duplicate.json()["id"])
             await client.post(f"/api/collections/{ids[1]}/investigations", json={})
             self.assertEqual((await client.post(f"/api/collections/{ids[2]}/investigations", json={})).status_code, 429)
-            db.execute("UPDATE investigations SET state='failed' WHERE collection_id=?", (ids[1],))
+            db.execute("UPDATE investigations SET state='failed' WHERE collection_id=%s", (ids[1],))
             first_id = one.json()["id"]
-            db.execute("UPDATE investigations SET state='completed', engine='groq', report=? WHERE id=?", (json.dumps(REPORT), first_id))
-            db.execute("INSERT INTO supplements(id,investigation_id,user_id,state,created_at) VALUES(?,?,?,?,?)", ("supp", first_id, "alice", "queued", db.now()))
+            db.execute("UPDATE investigations SET state='completed', engine='groq', report=%s WHERE id=%s", (json.dumps(REPORT), first_id))
+            db.execute("INSERT INTO supplements(id,investigation_id,user_id,state,created_at) VALUES(%s,%s,%s,%s,%s)", ("supp", first_id, "alice", "queued", db.now()))
             retry = (await client.post(f"/api/collections/{ids[1]}/investigations", json={})).json()["id"]
             self.assertEqual((await client.post(f"/api/collections/{ids[2]}/investigations", json={})).status_code, 429)
             db.init()
-            self.assertEqual(db.one("SELECT state FROM investigations WHERE id=?", (retry,))["state"], "interrupted")
-            self.assertEqual(db.one("SELECT count(*) n FROM investigations WHERE collection_id=?", (ids[1],))["n"], 2)
+            self.assertEqual(db.one("SELECT state FROM investigations WHERE id=%s", (retry,))["state"], "interrupted")
+            self.assertEqual(db.one("SELECT count(*) n FROM investigations WHERE collection_id=%s", (ids[1],))["n"], 2)
 
     async def test_groq_uses_import_services_bounded_queries_and_only_supplied_citations(self):
         id = self.collection(symptom="Intermittent errors; investigate.")
@@ -228,14 +236,14 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["state"], "completed", result["error"])
             self.assertEqual(len(calls), 2)
             self.assertEqual(result["usage"]["requests"], 2)
-            parent = db.one("SELECT * FROM investigations WHERE id=?", (job,))
+            parent = db.one("SELECT * FROM investigations WHERE id=%s", (job,))
             payload, supplied = supplement_payload(parent, saved_evidence(parent))
             self.assertLessEqual(len(encoded(payload)), INPUT_BYTES)
             self.assertTrue(supplied <= set(result["usage"]["supplied_evidence_ids"]))
             other_id = self.collection(owner="bob")
             wrong = db.evidence(None, "bob", collection_id=other_id)[0]["id"]
-            db.execute("UPDATE investigations SET usage=? WHERE id=?", (json.dumps({"supplied_evidence_ids": [wrong]}), job))
-            self.assertEqual(saved_evidence(db.one("SELECT * FROM investigations WHERE id=?", (job,)))["unavailable_source_ids"], [wrong])
+            db.execute("UPDATE investigations SET usage=%s WHERE id=%s", (json.dumps({"supplied_evidence_ids": [wrong]}), job))
+            self.assertEqual(saved_evidence(db.one("SELECT * FROM investigations WHERE id=%s", (job,)))["unavailable_source_ids"], [wrong])
 
     async def test_large_observation_fails_before_provider_and_invalid_calls_cannot_expand_scope(self):
         id = self.collection(lines({"service": "inventory", "message": "x"*12000}))
@@ -253,53 +261,3 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
         invalid["origin"] = "payment"
         with self.assertRaises(ValueError):
             validate_report(invalid, tools)
-
-
-class MigrationTests(unittest.TestCase):
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        storage = patch.object(db, "DATA", Path(directory.name))
-        storage.start()
-        self.addCleanup(storage.stop)
-        with patch("backend.db.migrate_collections"):
-            db.init()
-        db.execute("INSERT INTO users VALUES(?,?,?,?,?)", ("u", "User", "user", "hash", db.now()))
-        db.execute("INSERT INTO runs(id,user_id,scenario,state,created_at) VALUES(?,?,?,?,?)", ("run", "u", "pool", "completed", db.now()))
-        db.execute("INSERT INTO incidents VALUES(?,?,?,?,?,?,?)", ("incident", "run", "u", "Existing", "resolved", db.now(), db.now()))
-        db.execute("INSERT INTO evidence VALUES(?,?,?,?,?,?,?)", ("source", "run", "u", "log", "payment", db.now(), '{"message":"Existing"}'))
-        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at,report,usage) VALUES(?,?,?,?,?,?,?,?)",
-                   ("report", "incident", "u", "groq", "completed", db.now(), json.dumps(REPORT), '{"supplied_evidence_ids":["source"]}'))
-        db.execute("INSERT INTO supplements(id,investigation_id,user_id,state,created_at,result) VALUES(?,?,?,?,?,?)",
-                   ("supplement", "report", "u", "completed", db.now(), '{"summary":"Existing supplement"}'))
-
-    def test_version_two_upgrade_retains_every_field_and_foreign_key(self):
-        snapshot = {table: db.all_rows(f"SELECT * FROM {table}") for table in ("users", "runs", "incidents", "evidence", "investigations", "supplements")}
-        db.init()
-        db.init()
-        for table, old in snapshot.items():
-            new = db.all_rows(f"SELECT * FROM {table}")
-            self.assertEqual([{key: row[key] for key in old[0]} for row in new], old)
-        with db.connection() as conn:
-            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
-        self.assertEqual(saved_evidence(db.one("SELECT * FROM investigations WHERE id='report'"))["evidence"][0]["id"], "source")
-        self.assertEqual(db.one("SELECT MAX(version) n FROM schema_version")["n"], 5)
-
-    def test_migration_failure_rolls_back_schema_and_records(self):
-        from backend.migrations import migrate_collections
-        class FailingConnection:
-            def __init__(self, conn): self.conn = conn
-            def execute(self, sql, *args):
-                if sql.startswith("ALTER TABLE evidence_v3"):
-                    raise sqlite3.OperationalError("Fixture interruption")
-                return self.conn.execute(sql, *args)
-            def commit(self): self.conn.commit()
-            def rollback(self): self.conn.rollback()
-        with db.connection() as conn:
-            with self.assertRaises(sqlite3.OperationalError):
-                migrate_collections(FailingConnection(conn))
-            self.assertEqual(conn.execute("SELECT id FROM evidence").fetchone()[0], "source")
-            self.assertEqual(conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0], 2)
-            self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
-        db.init()
-        self.assertEqual(db.one("SELECT id FROM supplements")["id"], "supplement")

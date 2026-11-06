@@ -9,6 +9,8 @@ import { api, ApiError, setCsrf, type Detail, type Evidence, type Incident, type
 import { ImportWorkspace } from './imports'
 import { DemoWorkspace } from './scenarios'
 import { ConnectionsWorkspace } from './connections'
+import { AccountPage, parseAuthenticationLink, PasswordField, VerificationBanner, VerifyAccountPage, WritePermission } from './account'
+import { poll } from './poll'
 import { SourcePreviews, TriagePanel, WorkflowLabel } from './triage'
 import { Citations, EvidenceTimeline, FullTime, ObservationFields, SupplementPanel, useReportEvidence } from './reports'
 
@@ -19,7 +21,7 @@ const time = (value: string) => new Date(value).toLocaleTimeString([], { hour: '
 const shortId = (value: string) => value.slice(0, 6).toUpperCase()
 function Spinner() { return <LoaderCircle size={16} className="spin" /> }
 function Brand({ light = false }: { light?: boolean }) {
-  return <div className={'brand ' + (light ? 'brand-light' : '')}><span className="brand-symbol"><Activity size={23} /></span><span>escalation<span className="brand-desk">desk</span></span></div>
+  return <div className={'brand ' + (light ? 'brand-light' : '')}><span className="brand-symbol"><Activity size={23} /></span><span>Trace<span className="brand-desk">Desk</span></span></div>
 }
 function StateBadge({ state }: { state: string }) {
   const good = ['healthy', 'completed', 'resolved', 'supported'].includes(state)
@@ -28,6 +30,7 @@ function StateBadge({ state }: { state: string }) {
 }
 
 function Auth({ onSession }: { onSession: (session: Session) => void }) {
+  const [forgot, setForgot] = useState(false)
   const [signup, setSignup] = useState(false)
   const [demo, setDemo] = useState(false)
   const [demoAvailable, setDemoAvailable] = useState<boolean | null>(null)
@@ -49,6 +52,7 @@ function Auth({ onSession }: { onSession: (session: Session) => void }) {
     catch (e) { setError(e instanceof Error ? e.message : 'Unable to sign in.') }
     finally { setBusy(false) }
   }
+  if (forgot) return <AccountPage onExit={() => setForgot(false)} onRegister={() => { setForgot(false); setSignup(true); setDemo(false); setError('') }} />
   return <div className="auth-page">
     <section className="auth-story">
       <Brand light />
@@ -58,7 +62,7 @@ function Auth({ onSession }: { onSession: (session: Session) => void }) {
         <div className="auth-flow">{['Connect', 'Collect', 'Investigate'].map((name, i) => <div key={name}><span><Server size={17} />{name}</span>{i < 2 && <ArrowRight size={17} />}</div>)}</div>
         <div className="story-note"><GitBranch size={18} /><span>Your application logs and traces.<br />Every conclusion has a source.</span></div>
       </div>
-      <span className="auth-foot">ESCALATION DESK <span>LOCAL WORKSPACE / 01</span></span>
+      <span className="auth-foot">TRACEDESK <span>LOCAL WORKSPACE / 01</span></span>
     </section>
     <section className="auth-form-side">
       <div className="auth-form-wrap">
@@ -70,10 +74,11 @@ function Auth({ onSession }: { onSession: (session: Session) => void }) {
           {signup && <label>Your name<input name="name" autoComplete="name" placeholder="Alex Morgan" required maxLength={60} /></label>}
           {!demo && <label>Email address<input name="email" type="email" autoComplete="email" placeholder="you@example.com" required maxLength={200} /></label>}
           {demo && <p className="demo-password" role="status">{demoAvailable ? <>{demoCount} reviewed recorded cases. Read-only access.<br />Public password: <strong>Demo@login</strong></> : demoAvailable === false ? 'No reviewed demo recordings are installed. Use a regular account to connect Sentry or import logs.' : 'Checking recorded-demo availability…'}</p>}
-          {(!demo || demoAvailable) && <label>Password<input name="password" type="password" autoComplete={signup ? 'new-password' : 'current-password'} placeholder={signup ? 'At least 10 characters' : 'Enter your password'} required minLength={signup ? 10 : 1} maxLength={128} /></label>}
+          {(!demo || demoAvailable) && <PasswordField label="Password" name="password" autoComplete={signup ? 'new-password' : 'current-password'} placeholder={signup ? 'At least 10 characters' : 'Enter your password'} required minLength={signup ? 10 : 1} maxLength={128} disabled={busy} />}
           {error && <div className="error-banner" role="alert"><TriangleAlert size={16} />{error}</div>}
           <button className="button primary full" disabled={busy || (demo && !demoAvailable)}>{busy ? <Spinner /> : signup ? 'Create account' : 'Sign in'}{!busy && <ArrowRight size={16} />}</button>
         </form>
+        {!signup && !demo && <button className="button account-back" onClick={() => setForgot(true)}>Forgot password?</button>}
         <div className="privacy"><ShieldCheck size={17} /><span>Your investigations stay in your account.<br />Passwords are securely hashed.</span></div>
       </div>
       <div className="auth-local"><span className="live-dot" /> Running on your local machine</div>
@@ -160,6 +165,19 @@ export function ReportView({ investigation, onOpen, scope = null, evidenceError,
 }
 
 export default function App() {
+  const [authLink, setAuthLink] = useState(() => parseAuthenticationLink(window.location.hash))
+  const [invalidAuthLink, setInvalidAuthLink] = useState(() => window.location.hash.startsWith('#auth/') && !parseAuthenticationLink(window.location.hash))
+  useEffect(() => {
+    function consumeFragment() {
+      if (!window.location.hash.startsWith('#auth/')) return
+      const parsed = parseAuthenticationLink(window.location.hash)
+      setAuthLink(parsed); setInvalidAuthLink(!parsed)
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    }
+    consumeFragment()
+    window.addEventListener('hashchange', consumeFragment)
+    return () => window.removeEventListener('hashchange', consumeFragment)
+  }, [])
   const [user, setUser] = useState<User | null>(null)
   const [initializing, setInitializing] = useState(true)
   const [overview, setOverview] = useState<Overview | null>(null)
@@ -185,7 +203,10 @@ export default function App() {
     if (e instanceof ApiError && e.status === 401) { accountEpoch.current++; setUser(null); setOpenedEvidence(null); setCsrf(''); setSelected(''); setDetail(null) }
     setError(e instanceof Error ? e.message : 'Something went wrong. Try again.')
   }, [])
-  useEffect(() => { api<Session>('/auth/me').then(session).catch(e => { if (!(e instanceof ApiError && e.status === 401)) failure(e) }).finally(() => setInitializing(false)) }, [failure])
+  useEffect(() => {
+    const epoch = accountEpoch.current
+    api<Session>('/auth/me').then(value => { if (epoch === accountEpoch.current) session(value) }).catch(e => { if (epoch === accountEpoch.current && !(e instanceof ApiError && e.status === 401)) failure(e) }).finally(() => setInitializing(false))
+  }, [failure])
 
   const refresh = useCallback(async () => {
     const epoch = accountEpoch.current
@@ -197,28 +218,24 @@ export default function App() {
     else setSelected(value => value || nextIncidents[0]?.id || '')
   }, [])
   useEffect(() => {
-    if (!user || user.read_only) return
-    refresh().catch(failure)
-    const id = setInterval(() => refresh().catch(failure), 2000)
-    return () => clearInterval(id)
-  }, [user, refresh, failure])
+    if (!user || user.read_only || !user.email_verified || authLink || invalidAuthLink) return
+    return poll(() => refresh().catch(failure), nav === 'history' ? 5000 : 30000)
+  }, [user, refresh, failure, nav, authLink, invalidAuthLink])
   useEffect(() => {
-    if (!user || user.read_only || !selected) { setDetail(null); return }
+    if (!user || user.read_only || !user.email_verified || !selected || nav !== 'history' || authLink || invalidAuthLink) { setDetail(null); return }
     let cancelled = false
     const update = () => api<Detail>('/incidents/' + selected).then(value => { if (!cancelled) setDetail(value) }).catch(e => { if (!cancelled) failure(e) })
-    update()
-    const id = setInterval(update, 1500)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [user, selected, failure])
+    const stop = poll(update, 3000)
+    return () => { cancelled = true; stop() }
+  }, [user, selected, failure, nav, authLink, invalidAuthLink])
   const latestRunId = selectedRun || runs[0]?.id
   useEffect(() => {
-    if (!user || user.read_only || !latestRunId) { setRunEvidence([]); return }
+    if (!user || user.read_only || !user.email_verified || !latestRunId || nav !== 'history' || authLink || invalidAuthLink) { setRunEvidence([]); return }
     let cancelled = false
     const update = () => api<{ evidence: Evidence[] }>('/runs/' + latestRunId).then(value => { if (!cancelled) setRunEvidence(value.evidence) }).catch(e => { if (!cancelled) failure(e) })
-    update()
-    const id = setInterval(update, 2000)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [user, latestRunId, failure])
+    const stop = poll(update, 3000)
+    return () => { cancelled = true; stop() }
+  }, [user, latestRunId, failure, nav, authLink, invalidAuthLink])
   useEffect(() => {
     if (!openedEvidence) return
     modalClose.current?.focus()
@@ -262,10 +279,12 @@ export default function App() {
     else if (value === 'map') setTab('span')
     else setTab('assessment')
   }
+  if (authLink || invalidAuthLink) return <AccountPage key={authLink?.token || 'invalid'} link={authLink || undefined} invalid={invalidAuthLink} onExit={() => { setAuthLink(null); setInvalidAuthLink(false) }} onReset={() => { accountEpoch.current++; setUser(null); setCsrf(''); setOpenedEvidence(null); setDetail(null); setRuns([]); setIncidents([]); setOverview(null); setRunEvidence([]) }} onVerified={() => { void api<Session>('/auth/me').then(session).catch(() => { setUser(null); setCsrf('') }).finally(() => setAuthLink(null)) }} />
   if (initializing) return <div className="initializing"><Brand /><Spinner /><span>Opening your workspace…</span></div>
   if (!user) return <Auth onSession={session} />
+  if (!user.read_only && !user.email_verified) return <VerifyAccountPage user={user} onRefresh={async () => { const value = await api<Session>('/auth/me'); setUser(value.user); setCsrf(value.csrf) }} onLogout={logout} error={error} />
 
-  return <div className="app-shell">
+  return <WritePermission.Provider value={user.email_verified && !user.read_only}><div className="app-shell">
     <aside className="sidebar">
       <Brand light />
       <div className="workspace-switch"><span className="workspace-icon"><Layers3 size={18} /></span><div><strong>{user.read_only ? 'Demo Account' : 'Personal workspace'}</strong><span>Local environment</span></div><LockKeyhole size={13} /></div>
@@ -274,12 +293,13 @@ export default function App() {
         {(user.read_only ? [{ key: 'demo', label: 'Recorded cases', icon: Layers3 }] : [{ key: 'collections', label: 'Saved evidence', icon: Layers3 }, { key: 'connections', label: 'Connections', icon: GitBranch }, { key: 'imports', label: 'Import logs', icon: FileText }, { key: 'history', label: 'Recorded history', icon: Fingerprint }]).map(({ key, label, icon: Icon }) => <button key={key} className={nav === key ? 'active' : ''} onClick={() => navigate(key)}><Icon size={18} />{label}{key === 'overview' && <span className="nav-count">{incidents.length}</span>}</button>)}
       </nav>
 
-      <div className="sidebar-bottom"><div className="local-card"><Radio size={18} /><div><strong>Connected locally</strong><p>Saved locally. Groq uses selected evidence.</p></div></div><div className="user-row"><span className="avatar">{user.name.charAt(0).toUpperCase()}</span><div><strong>{user.name}</strong><span>{user.email}</span></div><button onClick={logout} title="Sign out" aria-label="Sign out"><LogOut size={17} /></button></div></div>
+      <div className="sidebar-bottom"><div className="local-card"><Radio size={18} /><div><strong>Connected locally</strong><p>Saved to your account. Investigations use selected evidence.</p></div></div><div className="user-row"><span className="avatar">{user.name.charAt(0).toUpperCase()}</span><div><strong>{user.name}</strong><span>{user.email}</span></div><button onClick={logout} title="Sign out" aria-label="Sign out"><LogOut size={17} /></button></div></div>
     </aside>
 
     <div className="main-shell">
       <header className="topbar"><div><span>Workspace</span><ChevronRight size={13} /><strong>{user.read_only ? 'Recorded demo' : nav === 'connections' ? 'Connections' : nav === 'imports' ? 'Import logs' : nav === 'history' ? 'Recorded history' : 'Saved evidence'}</strong></div><span className="connection-pill"><i />{user.read_only ? 'Recorded / Read-only' : 'Account-owned evidence'}</span></header>
       <main>
+        <VerificationBanner user={user} onRefresh={async () => { const value = await api<Session>('/auth/me'); setUser(value.user); setCsrf(value.csrf) }} />
         <div className="page-heading"><div><span className="eyebrow">OBSERVE. INVESTIGATE. UNDERSTAND.</span><h1>{user.read_only ? 'Follow the recorded evidence.' : nav === 'connections' ? 'Connect your application' : nav === 'imports' ? 'Import your application logs' : nav === 'history' ? 'Your recorded history' : 'Your evidence. Your investigations.'}</h1><p>Review application observations, investigate symptoms and inspect the sources behind each conclusion.</p></div><span className="date-label">{new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
 
         {error && <div className="error-banner global-error" role="alert"><TriangleAlert size={17} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
@@ -311,7 +331,7 @@ export default function App() {
 
           <section className="detail-panel">
             <div className="detail-heading"><div><span className="tiny-label">{selectedRun ? 'RUN-' + shortId(selectedRun) : selected ? 'INC-' + shortId(selected) : 'INVESTIGATION WORKSPACE'}</span><h2>{selectedRun ? scenarioNames[runs.find(run => run.id === selectedRun)?.scenario || 'healthy'] : selected ? 'From signals to a clear assessment.' : 'Every incident has a story.'}</h2></div>
-              {selected && !selectedRun && <div className="investigate-controls"><WorkflowLabel providers={overview?.providers} /><button className="button primary" onClick={investigate} disabled={!overview?.providers.groq || !!busy || investigating || activeStates.includes(selectedIncidentRun?.state || '')}>{investigating || busy === 'investigate' ? <Spinner /> : <Fingerprint size={15} />}{investigating ? 'Investigating' : investigation && ['failed', 'interrupted'].includes(investigation.state) ? 'Retry investigation' : 'Investigate'}</button></div>}
+              {selected && !selectedRun && <div className="investigate-controls"><WorkflowLabel providers={overview?.providers} /><button className="button primary" onClick={investigate} disabled={!user.email_verified || !overview?.providers.groq || !!busy || investigating || activeStates.includes(selectedIncidentRun?.state || '')}>{investigating || busy === 'investigate' ? <Spinner /> : <Fingerprint size={15} />}{investigating ? 'Investigating' : investigation && ['failed', 'interrupted'].includes(investigation.state) ? 'Retry investigation' : 'Investigate'}</button></div>}
             </div>
             {(selected || runs.length > 0) ? <>
               <div className="detail-tabs">{(selectedRun || !selected ? [{ key: 'log', name: 'Logs' }, { key: 'span', name: 'Traces' }, { key: 'metric', name: 'Metrics' }] : [{ key: 'assessment', name: 'Assessment' }, { key: 'log', name: 'Logs' }, { key: 'span', name: 'Traces' }, { key: 'metric', name: 'Metrics' }]).map(item => <button className={tab === item.key ? 'active' : ''} key={item.key} onClick={() => setTab(item.key)}>{item.name}{item.key !== 'assessment' && <span>{evidence.filter(row => row.kind === item.key).length}</span>}</button>)}</div>
@@ -323,10 +343,10 @@ export default function App() {
           </section>
         </div>
         </>}
-        <footer className="page-footer"><span><ShieldCheck size={13} />Account-scoped evidence · Stored locally</span><span>Escalation Desk <span className="footer-slash">/</span> Proof of concept</span></footer>
+        <footer className="page-footer"><span><ShieldCheck size={13} />Account-scoped evidence · Stored locally</span><span>TraceDesk <span className="footer-slash">/</span> Proof of concept</span></footer>
       </main>
     </div>
     {openedEvidence && <div className="modal-backdrop" onClick={() => setOpenedEvidence(null)}><section className="evidence-modal" role="dialog" aria-modal="true" aria-labelledby="evidence-title" onClick={e => e.stopPropagation()}><header><div><span className="tiny-label">RECORDED SOURCE OBSERVATION</span><h2 id="evidence-title">Evidence {shortId(openedEvidence.id)}</h2></div><button ref={modalClose} aria-label="Close evidence" onClick={() => setOpenedEvidence(null)}><X size={20} /></button></header><div className="modal-meta"><span className="service-label">{openedEvidence.service}</span><span>{openedEvidence.kind}</span><FullTime value={openedEvidence.timestamp} /></div><div className="modal-body"><ObservationFields row={openedEvidence} />{openedEvidence.original && <details><summary>Original imported content (redacted)</summary><pre>{openedEvidence.original}</pre></details>}<details><summary>Original recorded JSON</summary><pre>{JSON.stringify(openedEvidence, null, 2)}</pre></details></div><footer><LockKeyhole size={13} />Stored observation in your evidence run.</footer></section></div>}
-  </div>
+  </div></WritePermission.Provider>
 }
 

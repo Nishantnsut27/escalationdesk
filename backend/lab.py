@@ -307,20 +307,20 @@ class LabRuntime:
 
 def store_rows(collection, owner, rows):
     with db.connection() as conn:
-        for row in rows:
-            conn.execute("INSERT INTO evidence(id,collection_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)",
-                (row["id"], collection, owner, row["kind"], row["service"], row.get("timestamp"), json.dumps(row)))
+        with conn.cursor() as cursor:
+            cursor.executemany("INSERT INTO evidence(id,collection_id,user_id,kind,service,timestamp,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                [(row["id"], collection, owner, row["kind"], row["service"], row.get("timestamp"), json.dumps(row)) for row in rows])
 
 
 async def run_live(run_id, owner, case):
     collection = db.uid()
     meta = next(item for item in CATALOG if item["id"] == case)
-    db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                (collection, owner, meta["title"], "Investigate the captured operational observations.", "live_scenario", db.now(), collection, json.dumps(summary([], True))))
-    db.execute("UPDATE runs SET collection_id=?, state='running', stage='starting' WHERE id=?", (collection, run_id))
+    db.execute("UPDATE runs SET collection_id=%s, state='running', stage='starting' WHERE id=%s", (collection, run_id))
     runtime = LabRuntime(case, run_id, db.DATA / "scenarios" / run_id,
                          lambda rows: store_rows(collection, owner, rows),
-                         lambda stage, requests, failures: db.execute("UPDATE runs SET stage=?, requests=?, failures=? WHERE id=?", (stage, requests, failures, run_id)))
+                         lambda stage, requests, failures: db.execute("UPDATE runs SET stage=%s, requests=%s, failures=%s WHERE id=%s", (stage, requests, failures, run_id)))
     state, error = "completed", None
     try:
         async with asyncio.timeout(120):
@@ -335,6 +335,6 @@ async def run_live(run_id, owner, case):
                 await runtime.close()
         except Exception:
             state, error = "failed", "Workload cleanup did not finish; lease watchdog will stop remaining processes."
-        db.execute("UPDATE collections SET summary=? WHERE id=?", (json.dumps(summary(runtime.rows, state != "completed" or case == "incomplete")), collection))
-        db.execute("UPDATE runs SET state=?, stage='finished', error=?, ended_at=?, requests=?, failures=? WHERE id=?",
+        db.execute("UPDATE collections SET summary=%s WHERE id=%s", (json.dumps(summary(runtime.rows, state != "completed" or case == "incomplete")), collection))
+        db.execute("UPDATE runs SET state=%s, stage='finished', error=%s, ended_at=%s, requests=%s, failures=%s WHERE id=%s",
                    (state, error, db.now(), runtime.requests, runtime.failures, run_id))

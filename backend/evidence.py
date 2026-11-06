@@ -54,7 +54,7 @@ class EvidenceTools:
     def __init__(self, run_id, owner, *, groq=False, collection_id=None):
         self.run_id, self.owner, self.groq = run_id, owner, groq
         self.collection_id = collection_id
-        self.collection = db.one("SELECT * FROM collections WHERE id=? AND user_id=?", (collection_id, owner)) if collection_id else None
+        self.collection = db.one("SELECT * FROM collections WHERE id=%s AND user_id=%s", (collection_id, owner)) if collection_id else None
         if collection_id and not self.collection:
             raise ValueError("Evidence collection is unavailable.")
         self.services = set(json.loads(self.collection["summary"])["services"]) if self.collection else SERVICES
@@ -187,14 +187,14 @@ def representatives(rows):
     return [bucket[i] for i in range(max((len(b) for b in buckets.values()), default=0))
             for _, bucket in ordered if i < len(bucket)]
 
-def compact(rows, budget, priority=()):
+def compact(rows, budget, priority=(), *, preserve_priority=False):
     groups = [row for row in rows if row["id"] in priority]
     groups += representatives([row for row in rows if row["id"] not in priority])
     result = {"records": [], "matched_records": len(rows), "omitted_groups": len(groups),
               "note": "Repeated observations use one cited representative. Omitted sources are not citation candidates."}
     for row in groups:
         trial = {**result, "records": result["records"] + [row], "omitted_groups": result["omitted_groups"] - 1}
-        if len(encoded(trial)) <= budget - 40:
+        if (preserve_priority and row["id"] in priority) or len(encoded(trial)) <= budget - 40:
             result = trial
     return result
 
@@ -234,9 +234,17 @@ def http_exchanges(rows):
     spans = {(r.get("trace_id"), r.get("span_id")): r for r in rows if r["kind"] == "span"}
     exchanges = []
     for log in rows:
-        if log.get("span_op") == "http.server" and "http_status" in log:
+        # Legacy workload server spans carry the response in attributes. Keep
+        # that ownership explicit when their duplicate completion log is pruned.
+        legacy_server = log["kind"] == "span" and log.get("name") in {
+            log["service"]+".checkout", log["service"]+".request"}
+        completed_request = log["kind"] == "log" and log.get("message", "").lower() in {
+            "request completed", "checkout request completed"}
+        attributes = log.get("attributes")
+        response_status = log.get("http_status", attributes.get("http_status") if isinstance(attributes, dict) else None)
+        if (log.get("span_op") == "http.server" or legacy_server or completed_request) and response_status is not None:
             exchanges.append({"event": "generated_server_response", "service": log["service"],
-                              "response_status": log["http_status"], "trace_id": log.get("trace_id"),
+                              "response_status": response_status, "trace_id": log.get("trace_id"),
                               "sources": [log["id"]]})
             continue
         if log["kind"] != "log":
@@ -257,12 +265,37 @@ def http_exchanges(rows):
             event = {"event": "connection_failed_without_http_response", "error_type": log["error_type"]}
         else:
             continue
-        exchange = {"caller": log["service"], "downstream": downstream, **event, "sources": [log["id"]]}
+        exchange = {"caller": log["service"], "downstream": downstream, "trace_id": log.get("trace_id"), **event, "sources": [log["id"]]}
         if span and log.get("trace_id") and log.get("span_id") and "duration_ms" in span:
             exchange.update(measured_elapsed_ms_not_deadline=span["duration_ms"])
             exchange["sources"].append(span["id"])
         exchanges.append(exchange)
-    return exchanges[:4]
+    unique = {}
+    for exchange in exchanges:
+        key = encoded({k: v for k, v in exchange.items() if k not in {"sources", "measured_elapsed_ms_not_deadline"}})
+        if key not in unique:
+            unique[key] = exchange
+        else:
+            unique[key]["sources"] = list(dict.fromkeys(unique[key]["sources"] + exchange["sources"]))[:2]
+    return list(unique.values())[:6]
+
+
+def instance_relationships(rows):
+    """Expose only equality of explicit instance IDs, never an inferred cause."""
+    relationships = []
+    for caller in rows:
+        target = caller.get("target_instance")
+        if not isinstance(target, (str, int)) or isinstance(target, bool):
+            continue
+        peers = [row for row in rows if row["id"] != caller["id"] and row.get("instance") is not None
+                 and str(row["instance"]) == str(target)]
+        if peers:
+            relationships.append({"target_instance": str(target), "request_source": caller["id"],
+                "same_instance_sources": [row["id"] for row in peers[:4]],
+                "note": "Shared instance identifier only; lifecycle events may precede or follow this request."})
+        if len(relationships) == 2:
+            break
+    return relationships
 
 def evidence_tables(records):
     tables = {}
@@ -304,7 +337,16 @@ class EvidenceContext:
             if name == "get_trace":
                 self.selected_trace = args["trace_id"]
             if self.selected_trace:
-                self.trace_sources = {r["id"] for r in self.records.values() if r.get("trace_id") == self.selected_trace}
+                spans = {(r.get("trace_id"),r.get("span_id")): r for r in self.records.values() if r["kind"] == "span"}
+                def redundant_status(row):
+                    span = spans.get((row.get("trace_id"),row.get("span_id")),{})
+                    return (row["kind"] == "log" and row.get("message", "").lower() in {"request completed","checkout request completed"}
+                            and row.get("http_status") is not None and row["http_status"] == span.get("attributes",{}).get("http_status"))
+                self.trace_sources = {r["id"] for r in self.records.values()
+                                      if r.get("trace_id") == self.selected_trace and not redundant_status(r) and (
+                                          r["kind"] == "span" or any(key in r for key in (
+                                              "http_status", "timeout_ms", "error", "error_type", "exception_type",
+                                              "instance", "target_instance", "job_id")) or r.get("level") == "error")}
         self.queries.append({"tool": name, "arguments": args,
                              "returned": len(result.get("records", [])) if isinstance(result, dict) else len(result),
                              "omitted_groups": result.get("omitted_groups", 0) if isinstance(result, dict) else 0,
@@ -326,7 +368,10 @@ class EvidenceContext:
                 priority.add(success["id"])
         evidence_budget = budget
         while evidence_budget >= 0:
-            evidence = compact(list(self.records.values()), evidence_budget, priority)
+            # The final table encoding can be smaller than the row encoding used
+            # by tools. Fit against the complete request below; never discard a
+            # required relationship merely because this intermediate form grew.
+            evidence = compact(list(self.records.values()), evidence_budget, priority, preserve_priority=True)
             context = {"recent_queries": {
                            "columns": ["tool", "arguments", "returned", "omitted_groups", "query_limit_reached"],
                            "rows": [[q.get(k) for k in ("tool", "arguments", "returned", "omitted_groups", "query_limit_reached")]
@@ -338,6 +383,9 @@ class EvidenceContext:
                                     "supplied_trace_count": len({row["trace_id"] for row in evidence["records"] if row.get("trace_id")})}, "topology": self.topology,
                        "measured_timing_comparisons": timing_comparisons(evidence["records"]),
                        "observed_http_exchanges": http_exchanges(evidence["records"])}
+            identities = instance_relationships(evidence["records"])
+            if identities:
+                context["explicit_instance_relationships"] = identities
             if self.tools.collection:
                 summary = json.loads(self.tools.collection["summary"])
                 coverage = {k: v for k, v in summary.items() if k not in {"redaction_note", "input_bytes", "input_lines", "source", "datasets"}
@@ -379,5 +427,9 @@ class EvidenceContext:
                             self.triage_included = label
                             break
                 return payload, set(supplied)
+            if not ({row["id"] for row in evidence["records"]} - priority):
+                if priority:
+                    raise ValueError("The requested trace group cannot fit intact within the Groq input bound.")
+                raise ValueError("Groq input allowance is insufficient for the required request schema.")
             evidence_budget -= max(128, excess)
         raise ValueError("Groq input allowance is insufficient for the required request schema.")

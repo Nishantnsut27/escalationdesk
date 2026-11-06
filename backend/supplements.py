@@ -25,8 +25,8 @@ def saved_evidence(investigation):
     # Chunking avoids SQLite's variable limit without imposing the incident API's cap.
     for offset in range(0, len(ids), 400):
         chunk = ids[offset:offset + 400]
-        found = db.all_rows(f"SELECT * FROM evidence WHERE user_id=? AND {field}=? AND id IN (" +
-                            ",".join("?" for _ in chunk) + ")",
+        found = db.all_rows(f"SELECT * FROM evidence WHERE user_id=%s AND {field}=%s AND id IN (" +
+                            ",".join("%s" for _ in chunk) + ")",
                             (investigation["user_id"], scope_id, *chunk))
         rows.extend({**json.loads(row["payload"]), **{k: row[k] for k in ("id", "kind", "service", "timestamp")}}
                     for row in found)

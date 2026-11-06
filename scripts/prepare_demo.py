@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 from backend import db, demo
 from backend.catalog import CATALOG, CASE_IDS
 from backend.lab import LabRuntime, summary, store_rows
+from scripts.operator_control import workload, request_pause, paused
 
 BASE = ROOT / ".cache" / "phase8" / "v1"
 OWNER = "phase8-operator"
@@ -123,14 +124,14 @@ async def capture(case, recapture=False):
 
 def install_preparation(snapshot):
     collection = snapshot["collection"]
-    if db.one("SELECT id FROM collections WHERE id=?", (collection["id"],)):
+    if db.one("SELECT id FROM collections WHERE id=%s", (collection["id"],)):
         return
-    db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
         (collection["id"], OWNER, "Captured observations", collection["symptom"], "live_scenario", collection["created_at"], snapshot["evidence_digest"], json.dumps(collection["summary"])))
     store_rows(collection["id"], OWNER, snapshot["evidence"])
 
 
-async def analyze(cases, live, retry, questions=None, reuse_queries=False):
+async def analyze(cases, live, retry, questions=None, reuse_queries=False, resume=False, pause_check=lambda: False):
     from backend.investigator import Investigator
     from backend.provider import groq_http_client, jev_http_client
     from backend.triage import JevTriage
@@ -138,8 +139,13 @@ async def analyze(cases, live, retry, questions=None, reuse_queries=False):
         print("Analysis requires --live; no provider request made.")
         return
     db.DATA = BASE / "preparation"
+    from backend import postgres
+    from psycopg import sql
+    db._target, db._schema = postgres.test_target(), "operator_demo_preparation"
+    with postgres.connection(db._target) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(db._schema)))
     db.init()
-    db.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?)", (OWNER, "Operator", "operator@evaluation.invalid", "login-disabled", db.now()))
+    db.execute("INSERT INTO users VALUES(%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (OWNER, "Operator", "operator@evaluation.invalid", "login-disabled", db.now()))
     class PreparationInvestigator(Investigator):
         async def groq(self, tools, record, usage=None, progress=lambda state: None):
             question = (questions or {}).get(self.case)
@@ -155,11 +161,14 @@ async def analyze(cases, live, retry, questions=None, reuse_queries=False):
     async with groq_http_client() as groq, jev_http_client() as jev:
         worker = PreparationInvestigator(groq, triage=JevTriage(jev))
         for case in cases:
+            if paused(pause_check):
+                break
             directory = BASE / case
             snapshot = read(directory / "snapshot.json")
             install_preparation(snapshot)
             current = directory / "selected.json"
-            if current.exists() and not retry:
+            retained = read(current) if current.exists() else None
+            if retained and not retry and (not resume or retained["state"] == "completed"):
                 print(json.dumps({"case": case, "state": "saved attempt retained; use --retry for a new attempt"}), flush=True)
                 continue
             identifier = db.uid()
@@ -169,15 +178,20 @@ async def analyze(cases, live, retry, questions=None, reuse_queries=False):
                 previous = query_plan(snapshot, attempts)
                 worker.plan = [{key: entry[key] for key in ("tool", "arguments")} for entry in previous["activity"]]
                 worker.plan_attempt = previous["id"]
-            db.execute("INSERT INTO investigations(id,collection_id,user_id,engine,state,created_at,usage) VALUES(?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO investigations(id,collection_id,user_id,engine,state,created_at,usage) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                 (identifier, snapshot["collection"]["id"], OWNER, "groq", "queued", db.now(), json.dumps({"triage": {"requested": True, "state": "pending"}})))
-            await worker.investigate(identifier)
-            row = db.one("SELECT * FROM investigations WHERE id=?", (identifier,))
-            result = {k: row[k] for k in ("id", "engine", "state", "created_at", "completed_at", "error")}
-            result.update({k: json.loads(row[k]) if row[k] else None for k in ("report", "usage", "activity")})
-            save(directory / "attempts" / f"{identifier}.json", result)
-            save(current, result)
-            print(json.dumps({"case": case, "id": identifier, "state": result["state"], "error": result["error"]}), flush=True)
+            try:
+                await worker.investigate(identifier)
+            except asyncio.CancelledError:
+                db.execute("UPDATE investigations SET state='interrupted',completed_at=%s,error='Operator preparation interrupted; partial activity retained.' WHERE id=%s AND state IN ('queued','running','quota_waiting')", (db.now(),identifier))
+                raise
+            finally:
+                row = db.one("SELECT * FROM investigations WHERE id=%s", (identifier,))
+                result = {k: row[k] for k in ("id", "engine", "state", "created_at", "completed_at", "error")}
+                result.update({k: json.loads(row[k]) if row[k] else None for k in ("report", "usage", "activity")})
+                save(directory / "attempts" / f"{identifier}.json", result)
+                save(current, result)
+                print(json.dumps({"case": case, "id": identifier, "state": result["state"], "error": result["error"]}), flush=True)
             if result["state"] == "failed" and result["usage"].get("retry_at"):
                 print(json.dumps({"state": "preparation deferred", "retry_at": result["usage"]["retry_at"],
                                   "reason": "Provider cooldown; remaining cases were not sent to either provider."}), flush=True)
@@ -186,18 +200,28 @@ async def analyze(cases, live, retry, questions=None, reuse_queries=False):
 
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["capture", "analyze", "select", "review", "export", "install"])
+    parser.add_argument("action", choices=["capture", "analyze", "pause", "select", "review", "export", "install"])
     parser.add_argument("--case", choices=sorted(CASE_IDS) + ["all"], nargs="+", default=["all"])
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--retry", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Keep completed demo attempts and retry failed/interrupted or unattempted cases. Review is still required.")
     parser.add_argument("--recapture", action="store_true", help="Retain the previous draft capture and reports, then record a new capture version.")
     parser.add_argument("--notes-file", type=Path)
     parser.add_argument("--questions-file", type=Path, help="Optional JSON case-to-symptom questions; never expected answers or fault controls. Retained with provider provenance.")
     parser.add_argument("--attempt", help="Existing completed provider attempt ID to select without changing its content.")
     parser.add_argument("--reuse-queries", action="store_true", help="Replay a retained read-only query plan for this fixed capture, then request fresh Jev triage and a Groq report.")
     args = parser.parse_args()
+    if args.resume and args.retry:
+        parser.error("Use --resume to continue unfinished cases, or --retry to explicitly rerun selected cases, not both.")
     cases = [item["id"] for item in CATALOG] if "all" in args.case else list(dict.fromkeys(args.case))
     BASE.mkdir(parents=True, exist_ok=True)
+    if args.action == "pause":
+        request_pause()
+        return
+    if args.action == "analyze":
+        with workload() as pause_check:
+            await analyze(cases, args.live, args.retry, read(args.questions_file) if args.questions_file else None, args.reuse_queries, args.resume, pause_check)
+        return
     lock = BASE / ("capture.lock" if args.action == "capture" else "analysis.lock")
     try:
         handle = lock.open("x")
@@ -207,8 +231,6 @@ async def main():
         if args.action == "capture":
             for case in cases:
                 await capture(case, args.recapture)
-        elif args.action == "analyze":
-            await analyze(cases, args.live, args.retry, read(args.questions_file) if args.questions_file else None, args.reuse_queries)
         elif args.action == "review":
             if len(cases) != 1 or not args.notes_file:
                 raise ValueError("Review one case with --notes-file after inspecting its actual report and evidence.")

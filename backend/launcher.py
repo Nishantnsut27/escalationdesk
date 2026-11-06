@@ -88,14 +88,15 @@ def main():
             children.append(process)
             port = PORT if name == "platform" else SERVICES[name]
             path = "/api/health" if name == "platform" else "/health"
-            deadline = time.monotonic() + 40
+            # First startup also installs the saved demo over the remote database.
+            deadline = time.monotonic() + (120 if name == "platform" else 40)
             last_readiness = "not contacted"
             with httpx.Client(trust_env=False) as client:
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
                         raise RuntimeError(f"{name} could not start. See {DATA / (name + '.log')}")
                     try:
-                        response = client.get(f"http://127.0.0.1:{port}{path}", timeout=1)
+                        response = client.get(f"http://127.0.0.1:{port}{path}", timeout=5 if name == "platform" else 1)
                         last_readiness = f"HTTP {response.status_code}"
                         if response.status_code == 200:
                             break
@@ -104,7 +105,7 @@ def main():
                     time.sleep(0.2)
                 else:
                     raise RuntimeError(f"{name} did not become ready on port {port}: {last_readiness}.")
-        print(f"Escalation Desk is ready: http://127.0.0.1:{PORT}", flush=True)
+        print(f"TraceDesk is ready: http://127.0.0.1:{PORT}", flush=True)
         print("Workspace is running. Press Ctrl+C to stop.", flush=True)
         runtime_file.write_text(json.dumps({"pid": os.getpid(), "port": PORT}), encoding="utf-8")
         while not stopping:

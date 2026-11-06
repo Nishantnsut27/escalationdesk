@@ -3,6 +3,7 @@ import { Cable, ExternalLink, LoaderCircle, RefreshCw, Unplug, Download } from '
 import { api, ApiError, type SentryConnection, type SentryImport, type SentryWorkspace } from './api'
 import { CollectionView, type ViewProps } from './imports'
 import { FullTime } from './reports'
+import { useWritePermission } from './account'
 
 const active = ['queued', 'running', 'rate_limited']
 const incomplete = ['failed', 'partial', 'interrupted', 'cancelled']
@@ -16,7 +17,7 @@ export function SentrySetup({ configured, publicUrl }: { configured: boolean; pu
   return <section className="import-panel sentry-setup">
     <div className="section-heading"><h2><Cable size={18} />Connect your application through Sentry</h2><span>Read access</span></div>
     <ol><li>Add Sentry to your application and send errors, logs and traces to your own project.</li><li>Connect Sentry here, approve access and select your projects.</li><li>Import a time window, review the evidence and click Investigate.</li></ol>
-    <p>A website URL alone cannot provide backend logs. Your application's Sentry DSN sends telemetry; the authorization here lets Escalation Desk read it.</p>
+    <p>A website URL alone cannot provide backend logs. Your application's Sentry DSN sends telemetry; the authorization here lets TraceDesk read it.</p>
     <a href="https://docs.sentry.io/platforms/" target="_blank" rel="noreferrer">Application SDK setup <ExternalLink size={13} /></a>
     {!configured && <p className="import-guidance" role="status">Sentry connection setup is pending on this server. The operator must configure the public integration, HTTPS address and encrypted credential storage. Saved collections remain available.</p>}
     {publicUrl && globalThis.location?.origin !== publicUrl && <p className="import-guidance">For authorization, <a href={publicUrl}>open the configured HTTPS workspace</a> and sign in there.</p>}
@@ -25,6 +26,7 @@ export function SentrySetup({ configured, publicUrl }: { configured: boolean; pu
 }
 
 export function SentryImportCard({ item, busy, onAction, onOpen }: { item: SentryImport; busy: boolean; onAction: (action: string) => void; onOpen: () => void }) {
+  const canWrite = useWritePermission()
   return <article className="sentry-import-card">
     <div><strong>{item.parameters.title}</strong><span className="status-pill">{item.state.replaceAll('_', ' ')}</span></div>
     <p>{item.progress.observations || 0} observations retained / <FullTime value={item.created_at} /></p>
@@ -33,7 +35,7 @@ export function SentryImportCard({ item, busy, onAction, onOpen }: { item: Sentr
     {item.progress.retry_at && <p>Next retry: <FullTime value={new Date(item.progress.retry_at * 1000).toISOString()} /></p>}
     <div className="sentry-actions"><button className="button secondary" onClick={onOpen}>Review evidence</button>
       {active.includes(item.state) && <button className="button secondary" disabled={busy} onClick={() => onAction('cancel')}>Cancel import</button>}
-      {incomplete.includes(item.state) && <button className="button secondary" disabled={busy} onClick={() => onAction('retry')}>Retry as new snapshot</button>}
+      {incomplete.includes(item.state) && <button className="button secondary" disabled={!canWrite || busy} onClick={() => onAction('retry')}>Retry as new snapshot</button>}
     </div>
   </article>
 }
@@ -64,6 +66,7 @@ function ImportForm({ connection, disabled, onSubmit }: { connection: SentryConn
 }
 
 export function ConnectionsWorkspace(props: ViewProps) {
+  const canWrite = useWritePermission()
   const [data, setData] = useState<SentryWorkspace | null>(null)
   const [selected, setSelected] = useState('')
   const [collection, setCollection] = useState('')
@@ -103,15 +106,15 @@ export function ConnectionsWorkspace(props: ViewProps) {
     <SentrySetup configured={data?.configured || false} publicUrl={data?.public_url || ''} />
     {error && <p className="import-error" role="alert">{error}</p>}
     {!data && !error && <p role="status">Loading Sentry connections...</p>}
-    <section className="import-panel"><div className="sentry-actions"><label>Region for new authorization<select value={region} onChange={e => setRegion(e.target.value)} disabled={busy}><option value="us">United States</option><option value="eu">European Union</option></select></label><button className="button primary" onClick={() => void connect()} disabled={busy || !data?.configured}>{busy ? <LoaderCircle size={16} className="spin" /> : <Cable size={16} />}Connect Sentry</button></div>
+    <section className="import-panel"><div className="sentry-actions"><label>Region for new authorization<select value={region} onChange={e => setRegion(e.target.value)} disabled={busy}><option value="us">United States</option><option value="eu">European Union</option></select></label><button className="button primary" onClick={() => void connect()} disabled={!canWrite || busy || !data?.configured}>{busy ? <LoaderCircle size={16} className="spin" /> : <Cable size={16} />}Connect Sentry</button></div>
       {data && !data.connections.length && <p>No Sentry connections yet. Choose the region shown in your Sentry organization settings, then authorize access.</p>}
       {!!data?.connections.length && <label>Connection<select value={selected} onChange={e => setSelected(e.target.value)}>{data.connections.map(c => <option key={c.id} value={c.id}>{c.organization} / {c.region.toUpperCase()} / {c.state}</option>)}</select></label>}
       {current && <><div className="section-heading"><h2>{current.organization}</h2><span>{current.state.replaceAll('_', ' ')}</span></div>
         <ConnectionRegion region={current.region} />
         {current.error && <p className="import-error">{current.error}</p>}
         {current.checked_at && <p>Last checked <FullTime value={current.checked_at} /></p>}
-        <div className="sentry-actions"><button className="button secondary" disabled={busy || current.state !== 'connected'} onClick={() => void action(`/connections/sentry/${current.id}/check`)}><RefreshCw size={15} />Check access</button><button className="button secondary" disabled={busy || current.state === 'disconnected'} onClick={() => void action(`/connections/sentry/${current.id}/disconnect`)}><Unplug size={15} />Disconnect</button></div>
-        {current.state !== 'connected' ? <p>Use Connect Sentry to authorize this organization again. Saved snapshots remain readable. Local disconnect does not uninstall the integration in Sentry.</p> : <ImportForm key={current.id} connection={current} disabled={busy || !!activeImport} onSubmit={body => action(`/connections/sentry/${current.id}/imports`, body)} />}
+        <div className="sentry-actions"><button className="button secondary" disabled={!canWrite || busy || current.state !== 'connected'} onClick={() => void action(`/connections/sentry/${current.id}/check`)}><RefreshCw size={15} />Check access</button><button className="button secondary" disabled={busy || current.state === 'disconnected'} onClick={() => void action(`/connections/sentry/${current.id}/disconnect`)}><Unplug size={15} />Disconnect</button></div>
+        {current.state !== 'connected' ? <p>Use Connect Sentry to authorize this organization again. Saved snapshots remain readable. Local disconnect does not uninstall the integration in Sentry.</p> : <ImportForm key={current.id} connection={current} disabled={!canWrite || busy || !!activeImport} onSubmit={body => action(`/connections/sentry/${current.id}/imports`, body)} />}
       </>}
     </section>
     <section className="import-panel"><div className="section-heading"><h2>Recent imports</h2><span>Saved snapshots</span></div>{data?.imports.map(item => <SentryImportCard key={item.id} item={item} busy={busy} onOpen={() => setCollection(item.collection_id)} onAction={kind => void action(`/sentry-imports/${item.id}/${kind}`)} />)}{data && !data.imports.length && <p>Your imports will appear here. Analysis starts only when you click Investigate on saved evidence.</p>}</section>

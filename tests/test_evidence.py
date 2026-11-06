@@ -1,3 +1,4 @@
+from database import IsolatedDatabase, verify_users
 import json
 import asyncio
 from pathlib import Path
@@ -9,23 +10,43 @@ from types import SimpleNamespace
 import httpx
 from starlette.exceptions import HTTPException
 from backend import db
-from backend.evidence import EvidenceTools, EvidenceContext, DEFINITIONS, INPUT_BYTES, TOOL_BYTES, encoded
+from backend.evidence import EvidenceTools, EvidenceContext, DEFINITIONS, INPUT_BYTES, TOOL_BYTES, encoded, http_exchanges, instance_relationships
 from backend.investigator import validate_report
 from test_provider_contract import REPORT, Clock, success
+
+class RelationshipTests(unittest.TestCase):
+    def test_legacy_generated_response_is_distinct_from_received_peer_status(self):
+        rows = [
+            {"id": "received", "kind": "log", "service": "order", "trace_id": "trace", "span_id": "client", "downstream": "payment", "http_status": 503},
+            {"id": "returned", "kind": "span", "service": "order", "trace_id": "trace", "span_id": "server", "name": "order.checkout", "attributes": {"http_status": 502}},
+            {"id": "other", "kind": "log", "service": "order", "trace_id": "other-trace", "message": "Checkout request completed", "http_status": 200},
+        ]
+        exchanges = http_exchanges(rows)
+        self.assertEqual([(row["event"], row["response_status"], row["trace_id"]) for row in exchanges], [
+            ("received_downstream_error_response", 503, "trace"), ("generated_server_response", 502, "trace"),
+            ("generated_server_response", 200, "other-trace")])
+
+    def test_instance_links_require_an_explicit_matching_identifier(self):
+        rows = [{"id": "request", "target_instance": "worker-a"}, {"id": "exit", "instance": "worker-a"},
+                {"id": "healthy", "instance": "worker-b"}, {"id": "startup-error", "exit_code": 1}]
+        links = instance_relationships(rows)
+        self.assertEqual(links[0]["same_instance_sources"], ["exit"])
+        self.assertNotIn("startup-error", json.dumps(links))
+
 
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.patch = patch.object(db, "DATA", Path(self.directory.name))
+        self.patch = IsolatedDatabase(Path(self.directory.name))
         self.patch.start()
         self.addCleanup(self.patch.stop)
         db.init()
         for owner in ("alice", "bob"):
-            db.execute("INSERT INTO users VALUES(?,?,?,?,?)", (owner, owner, owner, "hash", db.now()))
-            db.execute("INSERT INTO runs(id,user_id,scenario,state,created_at) VALUES(?,?,?,?,?)", (owner, owner, "healthy", "completed", db.now()))
+            db.execute("INSERT INTO users VALUES(%s,%s,%s,%s,%s)", (owner, owner, owner, "hash", db.now()))
+            db.execute("INSERT INTO runs(id,user_id,scenario,state,created_at) VALUES(%s,%s,%s,%s,%s)", (owner, owner, "healthy", "completed", db.now()))
         self.trace = "a" * 32
-        with db.connection() as conn:
+        with db.connection() as conn, conn.pipeline():
             for i in range(260):
                 trace = self.trace if i >= 250 else "b" * 32
                 self.insert(conn, str(i), "alice", "log", "payment", f"2026-11-02T00:{i // 60:02d}:{i % 60:02d}+00:00",
@@ -33,7 +54,7 @@ class EvidenceTests(unittest.TestCase):
             self.insert(conn, "bob-source", "bob", "log", "payment", "2026-11-02T00:04:10+00:00", {"trace_id": self.trace})
 
     def insert(self, conn, id, owner, kind, service, timestamp, payload):
-        conn.execute("INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)", (id, owner, owner, kind, service, timestamp, json.dumps(payload)))
+        conn.execute("INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)", (id, owner, owner, kind, service, timestamp, json.dumps(payload)))
 
     def test_trace_time_and_account_filters_before_limits(self):
         tools = EvidenceTools("alice", "alice", groq=True)
@@ -161,7 +182,7 @@ class EvidenceTests(unittest.TestCase):
                  "timestamp": f"2026-11-02T00:{i // 60:02d}:{i % 60:02d}Z",
                  "requests": i, "queue_depth": 80 if 40 <= i < 80 else 0,
                  "message": "Queue sample"} for i in range(120)]
-        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                    ("long", "alice", "Long", "", "paste", db.now(), "long", json.dumps(summary(rows))))
         store_rows("long", "alice", rows)
         tools = EvidenceTools(None, "alice", groq=True, collection_id="long")
@@ -190,7 +211,7 @@ class EvidenceTests(unittest.TestCase):
         from backend.lab import store_rows, summary
         rows = [{"id": "caller", "kind": "log", "service": "gateway", "timestamp": db.now(),
                  "level": "error", "message": "Dependency failed", "downstream": "catalog", "http_status": 503}]
-        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                    ("callers", "alice", "Caller observations", "", "paste", db.now(), "callers", json.dumps(summary(rows))))
         store_rows("callers", "alice", rows)
         payloads = []
@@ -220,8 +241,8 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(payloads), 2)
 
     def test_restart_marks_waiting_interrupted_and_keeps_activity(self):
-        db.execute("INSERT INTO incidents VALUES(?,?,?,?,?,?,?)", ("incident", "alice", "alice", "title", "resolved", db.now(), db.now()))
-        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at,activity,usage) VALUES(?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO incidents VALUES(%s,%s,%s,%s,%s,%s,%s)", ("incident", "alice", "alice", "title", "resolved", db.now(), db.now()))
+        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at,activity,usage) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
             ("waiting", "incident", "alice", "groq", "quota_waiting", db.now(), '[{"tool":"search_logs","count":2}]', '{"requests":1}'))
         db.init()
         row = db.one("SELECT * FROM investigations WHERE id='waiting'")
@@ -231,9 +252,9 @@ class EvidenceTests(unittest.TestCase):
 
     def test_waiting_counts_as_active_and_retry_preserves_attempt(self):
         from backend.api import start_investigation
-        db.execute("INSERT INTO incidents VALUES(?,?,?,?,?,?,?)", ("incident", "alice", "alice", "title", "resolved", db.now(), db.now()))
+        db.execute("INSERT INTO incidents VALUES(%s,%s,%s,%s,%s,%s,%s)", ("incident", "alice", "alice", "title", "resolved", db.now(), db.now()))
         incident = db.one("SELECT * FROM incidents WHERE id='incident'")
-        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at) VALUES(?,?,?,?,?,?)",
+        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
                    ("waiting", "incident", "alice", "groq", "quota_waiting", db.now()))
         enqueued = []
         request = SimpleNamespace(path_params={"id": "incident"}, app=SimpleNamespace(state=SimpleNamespace(
@@ -242,7 +263,7 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as duplicate:
                 asyncio.run(start_investigation(request))
             self.assertEqual(duplicate.exception.status_code, 409)
-            db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at) VALUES(?,?,?,?,?,?)",
+            db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
                        ("queued", "incident", "alice", "rules", "queued", db.now()))
             with self.assertRaises(HTTPException) as limit:
                 asyncio.run(start_investigation(request))
@@ -257,8 +278,8 @@ class EvidenceTests(unittest.TestCase):
     def test_persisted_wait_keeps_evidence_and_resumes_without_repeating_tools(self):
         from backend.investigator import Investigator
         from backend.quota import GroqQuota
-        db.execute("INSERT INTO incidents VALUES(?,?,?,?,?,?,?)", ("incident", "alice", "alice", "title", "resolved", db.now(), db.now()))
-        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at) VALUES(?,?,?,?,?,?)",
+        db.execute("INSERT INTO incidents VALUES(%s,%s,%s,%s,%s,%s,%s)", ("incident", "alice", "alice", "title", "resolved", db.now(), db.now()))
+        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
                    ("live", "incident", "alice", "groq", "queued", db.now()))
         clock = Clock()
         observed = []

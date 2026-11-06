@@ -154,15 +154,15 @@ def public_import(row):
 def create_import(owner, connection, options, retry_of=None):
     fingerprint = hashlib.sha256(json.dumps([connection["id"], options, NORMALIZATION_VERSION], sort_keys=True).encode()).hexdigest()
     with db.connection() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        db.lock(conn)
         if not retry_of:
-            existing = conn.execute("SELECT * FROM sentry_imports WHERE user_id=? AND fingerprint=? ORDER BY rowid DESC LIMIT 1", (owner, fingerprint)).fetchone()
+            existing = conn.execute("SELECT * FROM sentry_imports WHERE user_id=%s AND fingerprint=%s ORDER BY created_at DESC,id DESC LIMIT 1", (owner, fingerprint)).fetchone()
             if existing:
                 return dict(existing), False
-        current = conn.execute("SELECT state FROM sentry_connections WHERE id=? AND user_id=?", (connection["id"], owner)).fetchone()
+        current = conn.execute("SELECT state FROM sentry_connections WHERE id=%s AND user_id=%s", (connection["id"], owner)).fetchone()
         if not current or current["state"] != "connected":
             raise HTTPException(409, "Reconnect Sentry before importing.")
-        if conn.execute("SELECT id FROM sentry_imports WHERE user_id=? AND state IN ('queued','running','rate_limited')", (owner,)).fetchone():
+        if conn.execute("SELECT id FROM sentry_imports WHERE user_id=%s AND state IN ('queued','running','rate_limited')", (owner,)).fetchone():
             raise HTTPException(409, "You already have an active Sentry import.")
         if conn.execute("SELECT COUNT(*) FROM sentry_imports WHERE state IN ('queued','running','rate_limited')").fetchone()[0] >= 20:
             raise HTTPException(429, "The import queue is full. Try again shortly.")
@@ -174,11 +174,11 @@ def create_import(owner, connection, options, retry_of=None):
             source={"provider": "sentry", "organization": connection["organization"], "connection_id": connection["id"],
                     "region": connection["region"], "projects": options["projects"], "start": options["start"], "end": options["end"]},
             normalization_version=NORMALIZATION_VERSION, datasets={}, truncated_records=0, out_of_window=0)
-        conn.execute("INSERT INTO collections VALUES(?,?,?,?,?,?,?,?,?)", (collection, owner, options["title"], options["symptom"],
+        conn.execute("INSERT INTO collections VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)", (collection, owner, options["title"], options["symptom"],
             None, "sentry", stamp, "sentry:" + job, json.dumps(summary)))
-        conn.execute("INSERT INTO sentry_imports(id,user_id,connection_id,collection_id,fingerprint,parameters,state,created_at,retry_of) VALUES(?,?,?,?,?,?,'queued',?,?)",
+        conn.execute("INSERT INTO sentry_imports(id,user_id,connection_id,collection_id,fingerprint,parameters,state,created_at,retry_of) VALUES(%s,%s,%s,%s,%s,%s,'queued',%s,%s)",
                      (job, owner, connection["id"], collection, fingerprint, json.dumps(options), stamp, retry_of))
-        return dict(conn.execute("SELECT * FROM sentry_imports WHERE id=?", (job,)).fetchone()), True
+        return dict(conn.execute("SELECT * FROM sentry_imports WHERE id=%s", (job,)).fetchone()), True
 
 
 class ImportWorker:
@@ -210,16 +210,16 @@ class ImportWorker:
                 await self.event.wait()
 
     def alive(self, job):
-        row = db.one("SELECT state FROM sentry_imports WHERE id=?", (job["id"],))
-        connection = db.one("SELECT state FROM sentry_connections WHERE id=?", (job["connection_id"],))
+        row = db.one("SELECT state FROM sentry_imports WHERE id=%s", (job["id"],))
+        connection = db.one("SELECT state FROM sentry_connections WHERE id=%s", (job["connection_id"],))
         if not row or row["state"] not in ACTIVE or not connection or connection["state"] != "connected":
             raise SentryError("Import cancelled or connection no longer available.")
 
     def progress(self, job, summary, state="running", extra=None):
         with db.connection() as conn:
-            if conn.execute("UPDATE sentry_imports SET state=?,progress=? WHERE id=? AND state IN ('queued','running','rate_limited')",
-                (state, json.dumps({"observations": summary["observations"], "datasets": summary["datasets"], **(extra or {})}), job["id"])).rowcount:
-                conn.execute("UPDATE collections SET summary=? WHERE id=?", (json.dumps(summary), job["collection_id"]))
+            if conn.execute("UPDATE sentry_imports SET state=%s,progress=%s WHERE id=%s AND state IN ('queued','running','rate_limited') RETURNING id",
+                (state, json.dumps({"observations": summary["observations"], "datasets": summary["datasets"], **(extra or {})}), job["id"])).fetchone():
+                conn.execute("UPDATE collections SET summary=%s WHERE id=%s", (json.dumps(summary), job["collection_id"]))
 
     async def page(self, job, connection, path, params, summary, deadline):
         for attempt in range(3):
@@ -244,7 +244,7 @@ class ImportWorker:
     def save(self, job, connection, project, dataset, records, summary):
         options = json.loads(job["parameters"])
         with db.connection() as conn:
-            current = conn.execute("SELECT state FROM sentry_imports WHERE id=?", (job["id"],)).fetchone()
+            current = conn.execute("SELECT state FROM sentry_imports WHERE id=%s", (job["id"],)).fetchone()
             if current["state"] not in ACTIVE:
                 raise SentryError("Import cancelled.")
             for source in records:
@@ -260,7 +260,7 @@ class ImportWorker:
                 encoded = json.dumps(payload)
                 digest = hashlib.sha256(encoded.encode()).hexdigest()
                 key = f'{project["id"]}:{dataset}:{row["source_id"]}'
-                if conn.execute("SELECT 1 FROM sentry_source_keys WHERE collection_id=? AND source_key=? AND content_digest=?", (job["collection_id"], key, digest)).fetchone():
+                if conn.execute("SELECT 1 FROM sentry_source_keys WHERE collection_id=%s AND source_key=%s AND content_digest=%s", (job["collection_id"], key, digest)).fetchone():
                     summary["duplicates"] += 1
                     continue
                 if summary["observations"] >= MAX_RECORDS or summary["input_bytes"] + len(encoded.encode()) > MAX_BYTES:
@@ -269,11 +269,11 @@ class ImportWorker:
                 if row["service"] not in summary["services"] and len(summary["services"]) >= 32:
                     summary["limit_reached"] = True
                     break
-                if conn.execute("SELECT 1 FROM sentry_source_keys WHERE collection_id=? AND source_key=?", (job["collection_id"], key)).fetchone():
+                if conn.execute("SELECT 1 FROM sentry_source_keys WHERE collection_id=%s AND source_key=%s", (job["collection_id"], key)).fetchone():
                     summary["conflicting_ids"] += 1
-                conn.execute("INSERT INTO evidence(id,user_id,kind,service,timestamp,payload,collection_id) VALUES(?,?,?,?,?,?,?)",
+                conn.execute("INSERT INTO evidence(id,user_id,kind,service,timestamp,payload,collection_id) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                     (row["id"], job["user_id"], row["kind"], row["service"], row["timestamp"], encoded, job["collection_id"]))
-                conn.execute("INSERT INTO sentry_source_keys VALUES(?,?,?,?)", (job["collection_id"], key, digest, row["id"]))
+                conn.execute("INSERT INTO sentry_source_keys VALUES(%s,%s,%s,%s)", (job["collection_id"], key, digest, row["id"]))
                 summary["observations"] += 1
                 summary["input_bytes"] += len(encoded.encode())
                 summary["redactions"] += changes
@@ -282,28 +282,28 @@ class ImportWorker:
                 summary["missing_services"] += int(row["service"] == "unknown")
                 summary["services"] = sorted(set(summary["services"]) | {row["service"]})
                 summary["kinds"] = sorted(set(summary["kinds"]) | {row["kind"]})
-            conn.execute("UPDATE collections SET summary=? WHERE id=?", (json.dumps(summary), job["collection_id"]))
+            conn.execute("UPDATE collections SET summary=%s WHERE id=%s", (json.dumps(summary), job["collection_id"]))
 
     async def run(self, job):
         try:
             await asyncio.wait_for(self._run(job), timeout=IMPORT_SECONDS)
         except TimeoutError:
             with db.connection() as conn:
-                summary = json.loads(conn.execute("SELECT summary FROM collections WHERE id=?", (job["collection_id"],)).fetchone()[0])
+                summary = json.loads(conn.execute("SELECT summary FROM collections WHERE id=%s", (job["collection_id"],)).fetchone()[0])
                 message = "Import exceeded its five-minute deadline. Retry to create a new snapshot."
-                changed = conn.execute("UPDATE sentry_imports SET state=?,error=? WHERE id=? AND state='interrupted'",
-                    ("partial" if summary["observations"] else "failed", message, job["id"])).rowcount
+                changed = conn.execute("UPDATE sentry_imports SET state=%s,error=%s WHERE id=%s AND state='interrupted' RETURNING id",
+                    ("partial" if summary["observations"] else "failed", message, job["id"])).fetchone()
                 if changed:
                     summary["coverage"] = message
-                    conn.execute("UPDATE collections SET summary=? WHERE id=?", (json.dumps(summary), job["collection_id"]))
+                    conn.execute("UPDATE collections SET summary=%s WHERE id=%s", (json.dumps(summary), job["collection_id"]))
 
     async def _run(self, job):
-        summary = json.loads(db.one("SELECT summary FROM collections WHERE id=?", (job["collection_id"],))["summary"])
+        summary = json.loads(db.one("SELECT summary FROM collections WHERE id=%s", (job["collection_id"],))["summary"])
         error, final = None, "completed"
         try:
             self.alive(job)
             self.progress(job, summary)
-            connection = db.one("SELECT * FROM sentry_connections WHERE id=?", (job["connection_id"],))
+            connection = db.one("SELECT * FROM sentry_connections WHERE id=%s", (job["connection_id"],))
             options = json.loads(job["parameters"])
             token = await self.client.token(connection["id"])
             projects = await self.client.projects(connection["organization"], connection["region"], token)
@@ -357,7 +357,7 @@ class ImportWorker:
         finally:
             summary["coverage"] = "Bounded Sentry snapshot; API retention, sampling and dataset access may limit coverage. " + (error or final + ".")
             with db.connection() as conn:
-                changed = conn.execute("UPDATE sentry_imports SET state=?,completed_at=?,error=?,progress=? WHERE id=? AND state IN ('queued','running','rate_limited')",
-                    (final, db.now(), error, json.dumps({"observations": summary["observations"], "datasets": summary["datasets"]}), job["id"])).rowcount
+                changed = conn.execute("UPDATE sentry_imports SET state=%s,completed_at=%s,error=%s,progress=%s WHERE id=%s AND state IN ('queued','running','rate_limited') RETURNING id",
+                    (final, db.now(), error, json.dumps({"observations": summary["observations"], "datasets": summary["datasets"]}), job["id"])).fetchone()
                 if changed:
-                    conn.execute("UPDATE collections SET summary=? WHERE id=?", (json.dumps(summary), job["collection_id"]))
+                    conn.execute("UPDATE collections SET summary=%s WHERE id=%s", (json.dumps(summary), job["collection_id"]))

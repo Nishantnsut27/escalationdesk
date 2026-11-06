@@ -1,34 +1,78 @@
 """Explicit live check: one scenario/investigation per invocation; consumes Groq quota."""
 import argparse
+from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import secrets
+import subprocess
+import sys
 import time
 import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from psycopg import sql
+from backend import db, postgres
+from backend.lab import ports
+
+
+@contextmanager
+def isolated_runtime(directory):
+    target = postgres.test_target()
+    schema = "operator_live_" + secrets.token_hex(12)
+    directory = directory / schema
+    directory.mkdir(parents=True)
+    previous = db.DATA, db._target, db._schema
+    with postgres.connection(target) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    db.DATA, db._target, db._schema = directory, target, schema
+    port = ports()
+    environment = {**os.environ, "DESK_DATABASE_URL": "", "DESK_TEST_DATABASE_URL": target,
+                   "DESK_TEST_SCHEMA": schema, "DESK_DATA_DIR": str(directory), "DESK_PORT": str(port),
+                   "DESK_ENABLE_LAB": "1", "DESK_PUBLIC_URL": "", "RESEND_API_KEY": "",
+                   "SENTRY_REFERENCE_ENABLED": "0", "PYTHONUNBUFFERED": "1"}
+    try:
+        with (directory / "launcher.log").open("w", encoding="utf-8") as log:
+            process = subprocess.Popen([sys.executable, "-m", "backend.launcher"], cwd=ROOT, env=environment,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            try:
+                print(json.dumps({"isolated_schema": schema, "artifacts": str(directory)}), flush=True)
+                yield f"http://127.0.0.1:{port}"
+            finally:
+                if process.poll() is None:
+                    (directory / "stop.request").write_text("stop", encoding="utf-8")
+                    process.wait(timeout=30)
+    finally:
+        db.DATA, db._target, db._schema = previous
+        # Retain the explicit operator schema and capture for later source review.
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", choices=["pool", "slow", "healthy"])
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--supplement", action="store_true", help="Explicitly request one further-analysis supplement after the Groq report.")
     args = parser.parse_args()
     directory = ROOT / ".cache" / "live-verification"
     directory.mkdir(parents=True, exist_ok=True)
+    with isolated_runtime(directory) as base_url:
+        check(args, directory, base_url)
+
+
+def check(args, directory, base_url):
     # Disposable local test identity; the same configured Groq account is always
     # used by the server. Keep this local password in memory only.
     account = {"name": "Live verification", "email": "live-" + secrets.token_hex(5) + "@example.test",
                "password": secrets.token_urlsafe(24)}
-    with httpx.Client(base_url=args.base_url, trust_env=False, timeout=15) as client:
-        ready_by = time.monotonic() + 30
+    with httpx.Client(base_url=base_url, trust_env=False, timeout=20) as client:
+        ready_by = time.monotonic() + 60
         while True:
             try:
                 client.get("/api/health").raise_for_status()
                 break
             except httpx.RequestError:
                 if time.monotonic() >= ready_by:
-                    raise SystemExit("Local runtime is not ready; start the launcher first.") from None
+                    raise SystemExit("Isolated runtime is not ready; inspect its retained launcher log.") from None
                 time.sleep(.5)
         if args.supplement:
             probe = client.get("/api/investigations/runtime-check/evidence")
@@ -36,6 +80,10 @@ def main():
                 raise SystemExit("Restart the runtime with the saved-report endpoints before consuming live quota.")
         response = client.post("/api/auth/signup", json=account)
         response.raise_for_status()
+        # Only this newly created test-project schema gets a verified fixture.
+        # Normal accounts must always complete the real email confirmation flow.
+        owner = response.json()["user"]["id"]
+        db.execute("INSERT INTO account_security(user_id,verified_at) VALUES(%s,%s)", (owner, db.now()))
         client.headers["X-CSRF-Token"] = response.json()["csrf"]
         before = len(client.get("/api/incidents").json())
         response = client.post(f"/api/scenarios/{args.scenario}/start", json={})

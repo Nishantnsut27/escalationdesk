@@ -1,3 +1,4 @@
+from database import IsolatedDatabase, verify_users
 """Offline authorization, bundle, migration and live-arrival regression tests."""
 import json
 import tempfile
@@ -35,7 +36,7 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(auth, "PUBLIC_URL", ""))
         self.directory = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent / ".cache")
         self.addCleanup(self.directory.cleanup)
-        self.storage = patch.object(db, "DATA", Path(self.directory.name))
+        self.storage = IsolatedDatabase(Path(self.directory.name))
         self.storage.start()
         self.addCleanup(self.storage.stop)
         db.init()
@@ -43,7 +44,8 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
         self.path = Path(self.directory.name) / "bundle.json"
         self.path.write_text(json.dumps(self.bundle), encoding="utf-8")
         demo.install(self.path)
-        db.execute("INSERT INTO users VALUES(?,?,?,?,?)", ("regular", "Regular", "regular@example.test", "unused", db.now()))
+        db.execute("INSERT INTO users VALUES(%s,%s,%s,%s,%s)", ("regular", "Regular", "regular@example.test", "unused", db.now()))
+        verify_users()
         self.app = create_app()
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://test")
         self.addAsyncCleanup(self.client.aclose)
@@ -78,7 +80,7 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await other.post("/api/auth/demo-login", json={"password": "Demo@login"})).status_code, 200)
         await self.client.post("/api/auth/logout", json={})
         self.assertEqual((await other.get("/api/auth/me")).status_code, 200)
-        db.execute("INSERT INTO sessions VALUES(?,?,?)", (auth.digest("regular-token"), "regular", time.time() + 60))
+        db.execute("INSERT INTO sessions VALUES(%s,%s,%s)", (auth.digest("regular-token"), "regular", time.time() + 60))
         self.client.cookies.set(auth.COOKIE, "regular-token")
         self.assertEqual((await self.client.get("/api/evidence/pool-0")).status_code, 404)
         self.assertEqual((await self.client.get("/api/demo/cases")).status_code, 403)
@@ -87,7 +89,7 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unpublished_demo_owned_sources_are_not_visible(self):
         await self.login()
-        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
             ("unpublished", demo.DEMO_ID, "Hidden", "", "paste", db.now(), "hidden", json.dumps(summary([]))))
         store_rows("unpublished", demo.DEMO_ID, [{"id": "hidden-source", "service": "fixture", "kind": "log", "timestamp": db.now(), "message": "Hidden"}])
         self.assertEqual((await self.client.get("/api/collections/unpublished")).status_code, 404)
@@ -109,12 +111,12 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before["investigations"], db.all_rows("SELECT * FROM investigations"))
 
     async def test_arrival_cursor_retains_late_timestamps_and_live_analysis_is_denied(self):
-        db.execute("INSERT INTO sessions VALUES(?,?,?)", (auth.digest("regular-token"), "regular", time.time() + 60))
+        db.execute("INSERT INTO sessions VALUES(%s,%s,%s)", (auth.digest("regular-token"), "regular", time.time() + 60))
         self.client.cookies.set(auth.COOKIE, "regular-token")
         self.client.headers["x-csrf-token"] = auth.digest("regular-token:csrf")
-        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
             ("live", "regular", "Live", "", "live_scenario", db.now(), "live", json.dumps(summary([]))))
-        db.execute("INSERT INTO runs(id,user_id,scenario,state,created_at,collection_id) VALUES(?,?,?,?,?,?)", ("run", "regular", "rollout", "running", db.now(), "live"))
+        db.execute("INSERT INTO runs(id,user_id,scenario,state,created_at,collection_id) VALUES(%s,%s,%s,%s,%s,%s)", ("run", "regular", "rollout", "running", db.now(), "live"))
         for index in range(3):
             store_rows("live", "regular", [{"id": f"event-{index}", "kind": "log", "service": "fixture", "timestamp": f"2026-01-01T00:00:0{3-index}+00:00", "message": str(index)}])
         first = (await self.client.get("/api/runs/run/evidence?limit=2")).json()
@@ -170,7 +172,7 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(self.path.parent.glob(".bundle-*.tmp")), [])
 
     async def test_reviewed_subset_unlocks_login_and_expands_without_rewriting_history(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(db, "DATA", Path(directory)):
+        with tempfile.TemporaryDirectory() as directory, IsolatedDatabase(Path(directory)):
             db.init()
             self.assertFalse(demo.ready())
             path = Path(directory) / "bundle.json"
@@ -181,13 +183,13 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
             await self.login()
             self.assertEqual((await self.client.get("/api/demo/cases")).json()[0]["slug"], "pool")
             before = db.all_rows("SELECT * FROM investigations")
-            account = db.one("SELECT * FROM users WHERE id=?", (demo.DEMO_ID,))
+            account = db.one("SELECT * FROM users WHERE id=%s", (demo.DEMO_ID,))
             subset["cases"] = self.bundle["cases"][:2]
             path.write_text(json.dumps(subset), encoding="utf-8")
             demo.install(path)
             self.assertEqual(demo.case_count(), 2)
-            self.assertEqual(before[0], db.one("SELECT * FROM investigations WHERE id=?", (before[0]["id"],)))
-            self.assertEqual(account, db.one("SELECT * FROM users WHERE id=?", (demo.DEMO_ID,)))
+            self.assertEqual(before[0], db.one("SELECT * FROM investigations WHERE id=%s", (before[0]["id"],)))
+            self.assertEqual(account, db.one("SELECT * FROM users WHERE id=%s", (demo.DEMO_ID,)))
             self.assertEqual(len((await self.client.get("/api/demo/cases")).json()), 2)
             subset["cases"] = self.bundle["cases"][:1]
             path.write_text(json.dumps(subset), encoding="utf-8")
@@ -197,7 +199,7 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_workspace_denies_live_controls_and_keeps_saved_evidence(self):
         from backend import config
-        db.execute("INSERT INTO sessions VALUES(?,?,?)", (auth.digest("regular-token"), "regular", time.time() + 60))
+        db.execute("INSERT INTO sessions VALUES(%s,%s,%s)", (auth.digest("regular-token"), "regular", time.time() + 60))
         self.client.cookies.set(auth.COOKIE, "regular-token")
         self.client.headers["x-csrf-token"] = auth.digest("regular-token:csrf")
         with patch.object(config, "ENABLE_LAB", False):

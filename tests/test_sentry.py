@@ -1,3 +1,4 @@
+from database import IsolatedDatabase, verify_users
 """Offline provider fixtures. These do not claim live Sentry acceptance."""
 import asyncio
 import hashlib
@@ -28,13 +29,13 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.enterContext(patch.object(db, "DATA", Path(directory.name)))
+        self.enterContext(IsolatedDatabase(Path(directory.name)))
         self.enterContext(patch.multiple(config, PUBLIC_URL="https://desk.test", CONNECTION_KEY=Fernet.generate_key().decode(),
             SENTRY_CLIENT_ID="fixture-client", SENTRY_CLIENT_SECRET="fixture-secret", SENTRY_APP_SLUG="escalation-desk"))
         db.init()
         for owner in ("alice", "bob", "demo"):
-            db.execute("INSERT INTO users VALUES(?,?,?,?,?)", (owner, owner, owner, "hash", db.now()))
-            db.execute("INSERT INTO sessions VALUES(?,?,?)", (auth.digest(owner), owner, time.time() + 600))
+            db.execute("INSERT INTO users VALUES(%s,%s,%s,%s,%s)", (owner, owner, owner, "hash", db.now()))
+            db.execute("INSERT INTO sessions VALUES(%s,%s,%s)", (auth.digest(owner), owner, time.time() + 600))
         db.execute("INSERT INTO account_roles VALUES('demo','demo')")
         self.calls, self.jobs = [], []
         self.handler = self.provider
@@ -42,6 +43,7 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.http.aclose)
         self.sentry = SentryClient(self.http)
         self.worker = ImportWorker(self.sentry)
+        verify_users()
         self.app = create_app()
         self.app.state.sentry = self.sentry
         self.app.state.sentry_importer = self.worker
@@ -74,9 +76,9 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
 
     def connection(self, owner="alice", installation="install-one"):
         id = db.uid()
-        db.execute("INSERT INTO sentry_connections(id,user_id,installation_id,organization,region,credentials,expires_at,state,projects,created_at) VALUES(?,?,?,?,?,?,?,'connected',?,?)",
+        db.execute("INSERT INTO sentry_connections(id,user_id,installation_id,organization,region,credentials,expires_at,state,projects,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,'connected',%s,%s)",
             (id, owner, installation, "sample", "us", seal({"token": TOKEN}), time.time() + 3600, json.dumps([PROJECT]), db.now()))
-        return db.one("SELECT * FROM sentry_connections WHERE id=?", (id,))
+        return db.one("SELECT * FROM sentry_connections WHERE id=%s", (id,))
 
     def options(self, **extra):
         return {"projects": ["42"], "datasets": ["logs", "errors", "spans"], "start": (self.now - timedelta(minutes=1)).isoformat(),
@@ -168,8 +170,8 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
     async def fixture_import(self, **options):
         self.now = datetime(2026, 11, 6, 0, 0, 3, tzinfo=timezone.utc)
         row = self.connection()
-        db.execute('UPDATE sentry_connections SET projects=? WHERE id=?', (json.dumps([FIXTURE['project']]), row['id']))
-        row = db.one('SELECT * FROM sentry_connections WHERE id=?', (row['id'],))
+        db.execute('UPDATE sentry_connections SET projects=%s WHERE id=%s', (json.dumps([FIXTURE['project']]), row['id']))
+        row = db.one('SELECT * FROM sentry_connections WHERE id=%s', (row['id'],))
         def respond(request):
             self.calls.append(request)
             if request.url.path.endswith('/projects/'):
@@ -182,20 +184,20 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
         self.handler = respond
         job = self.import_job(row, **options)
         await self.worker.run(job)
-        self.assertEqual(db.one('SELECT state FROM sentry_imports WHERE id=?', (job['id'],))['state'], 'completed')
+        self.assertEqual(db.one('SELECT state FROM sentry_imports WHERE id=%s', (job['id'],))['state'], 'completed')
         return row, job
 
     async def test_normalization_version_reimport_preserves_legacy_history(self):
         row, old = await self.fixture_import()
         # Reproduce the pre-version fingerprint and metadata of a saved import.
         options = json.loads(old['parameters'])
-        summary = json.loads(db.one('SELECT summary FROM collections WHERE id=?', (old['collection_id'],))['summary'])
+        summary = json.loads(db.one('SELECT summary FROM collections WHERE id=%s', (old['collection_id'],))['summary'])
         summary.pop('normalization_version')
-        db.execute('UPDATE collections SET summary=? WHERE id=?', (json.dumps(summary), old['collection_id']))
+        db.execute('UPDATE collections SET summary=%s WHERE id=%s', (json.dumps(summary), old['collection_id']))
         digest = hashlib.sha256(json.dumps([row['id'], options], sort_keys=True).encode()).hexdigest()
-        db.execute('UPDATE sentry_imports SET fingerprint=? WHERE id=?', (digest, old['id']))
+        db.execute('UPDATE sentry_imports SET fingerprint=%s WHERE id=%s', (digest, old['id']))
         source = db.evidence(None, 'alice', collection_id=old['collection_id'])[0]['id']
-        db.execute("INSERT INTO investigations(id,user_id,collection_id,engine,state,created_at,completed_at,report,usage) VALUES(?,?,?,'groq','completed',?,?,?,?)",
+        db.execute("INSERT INTO investigations(id,user_id,collection_id,engine,state,created_at,completed_at,report,usage) VALUES(%s,%s,%s,'groq','completed',%s,%s,%s,%s)",
             ('saved', 'alice', old['collection_id'], db.now(), db.now(), json.dumps({'evidence_ids': [source], 'summary': 'Original report'}), json.dumps({'supplied_evidence_ids': [source]})))
         before = {table: db.all_rows(f'SELECT * FROM {table}') for table in ('collections', 'evidence', 'investigations')}
         fresh, created = create_import('alice', row, options)
@@ -205,11 +207,11 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
         same, created = create_import('alice', row, options)
         self.assertFalse(created)
         self.assertEqual(same['id'], fresh['id'])
-        self.assertEqual(json.loads(db.one('SELECT summary FROM collections WHERE id=?', (fresh['collection_id'],))['summary'])['normalization_version'], 2)
+        self.assertEqual(json.loads(db.one('SELECT summary FROM collections WHERE id=%s', (fresh['collection_id'],))['summary'])['normalization_version'], 2)
         db.init()
         for table, rows in before.items():
             for saved in rows:
-                self.assertEqual(db.one(f'SELECT * FROM {table} WHERE id=?', (saved['id'],)), saved)
+                self.assertEqual(db.one(f'SELECT * FROM {table} WHERE id=%s', (saved['id'],)), saved)
         async with self.client() as alice, self.client('bob') as bob:
             self.assertEqual((await alice.get('/api/investigations/saved/evidence')).status_code, 200)
             for path in (f'/api/evidence/{source}', f'/api/collections/{old["collection_id"]}', '/api/investigations/saved/evidence'):
@@ -315,7 +317,7 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
         retry, _ = create_import("alice", db.one("SELECT * FROM sentry_connections"), json.loads(job['parameters']), job['id'])
         self.handler = lambda r: httpx.Response(200, json=[])
         await self.worker.run(retry)
-        self.assertIn("no longer authorized", db.one("SELECT error FROM sentry_imports WHERE id=?", (retry['id'],))['error'])
+        self.assertIn("no longer authorized", db.one("SELECT error FROM sentry_imports WHERE id=%s", (retry['id'],))['error'])
 
     async def test_rate_limit_retries_and_excessive_wait_remains_visible(self):
         job = self.import_job(datasets=["logs"])
@@ -394,7 +396,7 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(10)
         with patch.object(self.sentry, 'projects', slow), patch('backend.sentry_imports.IMPORT_SECONDS', .02):
             await self.worker.run(retry)
-        self.assertIn('deadline', db.one('SELECT error FROM sentry_imports WHERE id=?', (retry['id'],))['error'])
+        self.assertIn('deadline', db.one('SELECT error FROM sentry_imports WHERE id=%s', (retry['id'],))['error'])
 
     async def test_cancel_and_other_account_cannot_change_or_read_job(self):
         job = self.import_job()

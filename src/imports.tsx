@@ -4,11 +4,13 @@ import { api, ApiError, type Collection, type CollectionDetail, type EvidencePag
 import { FullTime, useReportEvidence } from './reports'
 import { WorkflowLabel } from './triage'
 import type { ReportView, ServiceMap, EvidenceTable } from './App'
+import { useWritePermission } from './account'
 
 const active = ['queued', 'running', 'quota_waiting']
 export const IMPORT_BYTES = 1024 * 1024
 
 export function ImportForm({ onImported, onError }: { onImported: (value: Collection) => void; onError: (error: unknown) => void }) {
+  const canWrite = useWritePermission()
   const [content, setContent] = useState('')
   const [filename, setFilename] = useState<string | undefined>()
   const [title, setTitle] = useState('')
@@ -57,7 +59,7 @@ export function ImportForm({ onImported, onError }: { onImported: (value: Collec
       <label>What did you observe? (optional)<textarea value={symptom} onChange={e => setSymptom(e.target.value)} maxLength={2000} rows={2} placeholder="For example: sign-in requests started returning 500." disabled={busy} /></label>
       <p className="report-note">Up to 1 MiB, 5,000 observations and 32 services per import. UTF-8 text only. Common credentials are redacted; review saved content before investigating with Jev and Groq. Importing does not start analysis.</p>
       {error && <p className="import-error" role="alert">{error}</p>}
-      <button className="button primary" disabled={busy || !content.trim()}>{busy ? <LoaderCircle size={16} className="spin" /> : <Upload size={16} />}{busy ? 'Importing...' : 'Save logs'}</button>
+      <button className="button primary" disabled={!canWrite || busy || !content.trim()}>{busy ? <LoaderCircle size={16} className="spin" /> : <Upload size={16} />}{busy ? 'Importing...' : 'Save logs'}</button>
     </form>
   </section>
 }
@@ -91,6 +93,7 @@ export type ViewProps = {
 }
 
 export function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapComponent, TableComponent }: ViewProps & { id: string }) {
+  const canWrite = useWritePermission()
   const [detail, setDetail] = useState<CollectionDetail | null>(null)
   const [historyId, setHistoryId] = useState('')
   const [tab, setTab] = useState('assessment')
@@ -144,7 +147,7 @@ export function CollectionView({ id, overview, onOpen, onError, ReportComponent,
     <MapComponent overview={null} services={detail.collection.summary.services} evidence={scope?.evidence || []} report={investigation?.report} evidenceReady={!!scope} />
     <div className="detail-heading"><h2>Review the evidence</h2><div className="investigate-controls">
       <WorkflowLabel providers={overview?.providers} />
-      <button className="button primary" onClick={investigate} disabled={!overview?.providers.groq || busy || investigating || importing || !detail.collection.summary.observations}>{busy || investigating ? <LoaderCircle size={16} className="spin" /> : <Fingerprint size={16} />}{importing ? 'Import in progress' : investigating ? 'Investigating' : 'Investigate'}</button>
+      <button className="button primary" onClick={investigate} disabled={!canWrite || !overview?.providers.groq || busy || investigating || importing || !detail.collection.summary.observations}>{busy || investigating ? <LoaderCircle size={16} className="spin" /> : <Fingerprint size={16} />}{importing ? 'Import in progress' : investigating ? 'Investigating' : 'Investigate'}</button>
     </div></div>
     <p className="import-guidance">Investigate sends selected redacted observations to OpenRouter Jev for initial triage, then Groq for an assessment. Missing evidence remains unknown; review the cited sources and limitations.</p>
     {error && <p className="import-error" role="alert">{error}</p>}

@@ -105,6 +105,7 @@ export function SupplementResult({ supplement, onOpen }: { supplement: Supplemen
 }
 
 export function SupplementPanel({ investigation, onOpen, onUpdate }: { investigation: Investigation; onOpen: (id: string) => void; onUpdate?: (value: Investigation) => void }) {
+  const canWrite = useWritePermission()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const submitting = useRef(false)
@@ -121,9 +122,10 @@ export function SupplementPanel({ investigation, onOpen, onUpdate }: { investiga
     finally { submitting.current = false; setBusy(false) }
   }
   return <section className="supplement-panel" aria-label="Further analysis"><h4>Further analysis</h4><p className="report-note">An optional Groq review of this report’s saved evidence. The original assessment stays above. No new telemetry is collected.</p>
-    {(!latest || retry) && <button className="button primary" disabled={busy} onClick={start}>{busy ? 'Submitting…' : retry ? 'Retry further analysis' : 'Analyze further'}</button>}
+    {(!latest || retry) && <button className="button primary" disabled={!canWrite || busy} onClick={start}>{busy ? 'Submitting…' : retry ? 'Retry further analysis' : 'Analyze further'}</button>}
     {retry && <p className="report-note">Explicit retry creates a new retained attempt.</p>}
     {error && <p role="alert" className="supplement-error">{error}</p>}
     {supplements.map(item => <SupplementResult key={item.id} supplement={item} onOpen={onOpen} />)}
   </section>
 }
+import { useWritePermission } from './account'

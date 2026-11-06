@@ -17,24 +17,31 @@ TEST_DATA.mkdir(parents=True)
 os.environ["DESK_DATA_DIR"] = str(TEST_DATA)
 os.environ["DESK_PORT"] = "8765"
 os.environ["GROQ_API_KEY"] = ""
+os.environ["RESEND_API_KEY"] = ""
 os.environ["DESK_PUBLIC_URL"] = ""  # This isolated runtime uses loopback HTTP, not the operator's HTTPS tunnel.
 
 import httpx
 from backend.investigator import EvidenceTools, rule_report, validate_report
 from backend import db
+from database import IsolatedDatabase, verify_users
 
 class LocalProductTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.storage = IsolatedDatabase(TEST_DATA).start()
+        cls.addClassCleanup(cls.storage.stop)
+        cls.runtime_environment = {**os.environ, "DESK_ENABLE_LAB": "1",
+            "DESK_TEST_SCHEMA": cls.storage.schema, "DESK_TEST_DATABASE_URL": cls.storage.target,
+            "DESK_DATABASE_URL": ""}
         cls.log = (TEST_DATA / "launcher.log").open("w")
         cls.server = subprocess.Popen([sys.executable, "-m", "backend.launcher"], cwd=ROOT,
-            env={**os.environ, "DESK_ENABLE_LAB": "1"}, stdin=subprocess.PIPE, stdout=cls.log, stderr=subprocess.STDOUT,
+            env=cls.runtime_environment, stdin=subprocess.PIPE, stdout=cls.log, stderr=subprocess.STDOUT,
             text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         cls.addClassCleanup(cls.cleanup_runtime)
         cls.base = "http://127.0.0.1:8765"
         cls.a = httpx.Client(base_url=cls.base, trust_env=False, timeout=20)
         cls.b = httpx.Client(base_url=cls.base, trust_env=False, timeout=20)
-        deadline = time.monotonic() + 50
+        deadline = time.monotonic() + 150
         while time.monotonic() < deadline:
             if cls.server.poll() is not None:
                 raise RuntimeError((TEST_DATA / "launcher.log").read_text())
@@ -56,6 +63,7 @@ class LocalProductTests(unittest.TestCase):
             client.headers["X-CSRF-Token"] = session["csrf"]
         cls.owner_a = cls.a.get("/api/auth/me").json()["user"]["id"]
         cls.owner_b = cls.b.get("/api/auth/me").json()["user"]["id"]
+        verify_users()
 
     @classmethod
     def cleanup_runtime(cls):
@@ -116,7 +124,7 @@ class LocalProductTests(unittest.TestCase):
         self.assertEqual(self.a.post("/api/scenarios/pool/start", json={}, headers={"Origin": "https://other.example"}).status_code, 403)
         self.assertEqual(self.a.post("/api/scenarios/unsupported/start", json={}).status_code, 400)
         self.assertEqual(self.a.get("/api/auth/me").headers["Cache-Control"], "no-store")
-        with closing(sqlite3.connect(TEST_DATA / "platform.sqlite3")) as conn:
+        with db.connection() as conn:
             stored = conn.execute("SELECT password_hash FROM users WHERE email='alice@example.test'").fetchone()[0]
             self.assertTrue(stored.startswith("$argon2id$"))
             self.assertNotIn(self.password, stored)
@@ -180,8 +188,8 @@ class LocalProductTests(unittest.TestCase):
         self.assertTrue(any(row.get("service") == "gateway" and row.get("http_status") == 200 for row in result["evidence"]))
         with closing(sqlite3.connect(TEST_DATA / "payment.sqlite3")) as conn:
             self.assertGreater(conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0], 0)
-        with closing(sqlite3.connect(TEST_DATA / "platform.sqlite3")) as conn:
-            self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name='payments'").fetchone())
+        with db.connection() as conn:
+            self.assertIsNone(conn.execute("SELECT to_regclass('payments')").fetchone()[0])
 
     def test_04_healthy_traffic_no_false_incident(self):
         before = len(self.a.get("/api/incidents").json())
@@ -228,7 +236,7 @@ class LocalProductTests(unittest.TestCase):
         response = self.b.post("/api/auth/login", json={"email": "bob@example.test", "password": self.password})
         self.assertEqual(response.status_code, 200)
         self.b.headers["X-CSRF-Token"] = response.json()["csrf"]
-        db.execute("UPDATE sessions SET expires=0 WHERE user_id=?", (self.owner_b,))
+        db.execute("UPDATE sessions SET expires=0 WHERE user_id=%s", (self.owner_b,))
         self.assertEqual(self.b.get("/api/auth/me").status_code, 401)
 
     def test_08_throttled_login_attempts(self):
@@ -242,9 +250,9 @@ class LocalProductTests(unittest.TestCase):
         self.server.wait(timeout=20)
         self.server.stdin.close()
         self.__class__.server = subprocess.Popen([sys.executable, "-m", "backend.launcher"], cwd=ROOT,
-            env=os.environ.copy(), stdin=subprocess.PIPE, stdout=self.log, stderr=subprocess.STDOUT,
+            env=self.runtime_environment, stdin=subprocess.PIPE, stdout=self.log, stderr=subprocess.STDOUT,
             text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 150
         while time.monotonic() < deadline:
             try:
                 if self.a.get("/api/health").status_code == 200:

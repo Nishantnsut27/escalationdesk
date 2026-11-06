@@ -1,3 +1,4 @@
+from database import IsolatedDatabase, verify_users
 import asyncio
 import json
 from copy import deepcopy
@@ -26,20 +27,21 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.storage = patch.object(db, "DATA", Path(directory.name))
+        self.storage = IsolatedDatabase(Path(directory.name))
         self.storage.start()
         self.addCleanup(self.storage.stop)
         db.init()
         for owner in ("alice", "bob"):
-            db.execute("INSERT INTO users VALUES(?,?,?,?,?)", (owner, owner, owner, "hash", db.now()))
-            db.execute("INSERT INTO sessions VALUES(?,?,?)", (auth.digest(owner), owner, time.time() + 600))
-            db.execute("INSERT INTO runs(id,user_id,scenario,state,created_at) VALUES(?,?,?,?,?)", (owner, owner, "healthy", "completed", db.now()))
-            db.execute("INSERT INTO incidents VALUES(?,?,?,?,?,?,?)", (owner, owner, owner, "title", "resolved", db.now(), db.now()))
+            db.execute("INSERT INTO users VALUES(%s,%s,%s,%s,%s)", (owner, owner, owner, "hash", db.now()))
+            db.execute("INSERT INTO sessions VALUES(%s,%s,%s)", (auth.digest(owner), owner, time.time() + 600))
+            db.execute("INSERT INTO runs(id,user_id,scenario,state,created_at) VALUES(%s,%s,%s,%s,%s)", (owner, owner, "healthy", "completed", db.now()))
+            db.execute("INSERT INTO incidents VALUES(%s,%s,%s,%s,%s,%s,%s)", (owner, owner, owner, "title", "resolved", db.now(), db.now()))
         self.add_source("one")
         self.add_source("two", service="order")
         self.add_source("bob-only", owner="bob")
         self.add_parent("parent")
         self.enqueued = []
+        verify_users()
         self.app = create_app()
         self.app.state.investigator = SimpleNamespace(enqueue=self.enqueued.append, enqueue_supplement=self.enqueued.append)
         self.configured = patch("backend.api.GROQ_KEY", "test-key")
@@ -47,16 +49,16 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.configured.stop)
 
     def add_source(self, id, owner="alice", kind="log", service="payment", **payload):
-        db.execute("INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(?,?,?,?,?,?,?)", (id, owner, owner, kind, service,
+        db.execute("INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)", (id, owner, owner, kind, service,
                    "2026-11-02T00:00:04+00:00", json.dumps({"message": "Observed", **payload})))
 
     def add_parent(self, id, engine="groq", ids=None, report=None):
-        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at,completed_at,report,usage) VALUES(?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO investigations(id,incident_id,user_id,engine,state,created_at,completed_at,report,usage) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                    (id, "alice", "alice", engine, "completed", db.now(), db.now(), json.dumps(report or REPORT),
                     json.dumps({"requests": 2, "supplied_evidence_ids": ids if ids is not None else ["one", "two"]})))
 
     def parent(self, id="parent"):
-        return db.one("SELECT * FROM investigations WHERE id=?", (id,))
+        return db.one("SELECT * FROM investigations WHERE id=%s", (id,))
 
     def client(self, owner="alice", csrf=True):
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://test",
@@ -74,7 +76,7 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
         calls, waits = [], []
         clock = Clock()
         async def sleep(seconds):
-            current = db.one("SELECT * FROM supplements WHERE id=?", (row["id"],))
+            current = db.one("SELECT * FROM supplements WHERE id=%s", (row["id"],))
             self.assertEqual(current["state"], "quota_waiting")
             waits.append(current)
             await clock.sleep(seconds)
@@ -90,7 +92,7 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
             with patch("backend.investigator.GROQ_KEY", "secret"), patch("backend.evidence.EvidenceTools.call", side_effect=AssertionError("No fresh queries")):
                 await Investigator(client, GroqQuota(clock=clock, sleep=sleep)).supplement(row["id"])
         self.assertEqual(self.parent(), parent_before)
-        saved = db.one("SELECT * FROM supplements WHERE id=?", (row["id"],))
+        saved = db.one("SELECT * FROM supplements WHERE id=%s", (row["id"],))
         self.assertNotIn("secret", saved["usage"])
         return saved, calls, waits
 
@@ -100,11 +102,12 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
             {"finish_reason": finish, "message": {"content": json.dumps(RESULT if result is None else result), "reasoning": "PRIVATE"}}]})
 
     async def test_scope_over_200_deduplicated_owned_and_missing(self):
-        ids = []
-        for i in range(215):
-            id = f"extra-{i}"
-            self.add_source(id)
-            ids.append(id)
+        ids = [f"extra-{i}" for i in range(215)]
+        with db.connection() as conn:
+            conn.cursor().executemany(
+                "INSERT INTO evidence(id,run_id,user_id,kind,service,timestamp,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                [(id, "alice", "alice", "log", "payment", "2026-11-02T00:00:04+00:00",
+                  json.dumps({"message": "Observed"})) for id in ids])
         ids += ["one", "one", "missing", "bob-only"]
         self.add_parent("wide", ids=ids)
         async with self.client() as client:
@@ -150,13 +153,13 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.enqueued), 1)
         first = ids.pop()
         for state in ("running", "quota_waiting", "completed"):
-            db.execute("UPDATE supplements SET state=? WHERE id=?", (state, first))
+            db.execute("UPDATE supplements SET state=%s WHERE id=%s", (state, first))
             self.assertEqual((await self.submit(body={"retry": True}))["id"], first)
-        db.execute("UPDATE supplements SET state='failed' WHERE id=?", (first,))
+        db.execute("UPDATE supplements SET state='failed' WHERE id=%s", (first,))
         self.assertEqual((await self.submit())["id"], first)
         second = await self.submit(body={"retry": True})
         self.assertNotEqual(second["id"], first)
-        self.assertEqual(db.one("SELECT state FROM supplements WHERE id=?", (first,))["state"], "failed")
+        self.assertEqual(db.one("SELECT state FROM supplements WHERE id=%s", (first,))["state"], "failed")
         async with self.client() as client:
             saved = (await client.get("/api/investigations/parent")).json()
             self.assertEqual(len(saved["supplements"]), 2)
@@ -292,14 +295,14 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
         before = self.parent()
         for state in ("queued", "running", "quota_waiting", "completed", "failed"):
             self.add_parent(state)
-            db.execute("INSERT INTO supplements(id,investigation_id,user_id,state,created_at,source_ids,usage) VALUES(?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO supplements(id,investigation_id,user_id,state,created_at,source_ids,usage) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                        (state, state, "alice", state, db.now(), '["one"]', '{"requests":1}'))
         db.init()
         db.init()
         self.assertEqual(self.parent(), before)
-        self.assertEqual(db.one("SELECT MAX(version) version FROM schema_version")["version"], 5)
+        self.assertEqual(db.one("SELECT MAX(version) version FROM platform_migrations")["version"], 2)
         for state in ("queued", "running", "quota_waiting", "completed", "failed"):
-            row = db.one("SELECT * FROM supplements WHERE id=?", (state,))
+            row = db.one("SELECT * FROM supplements WHERE id=%s", (state,))
             self.assertEqual(row["state"], "interrupted" if state in ("queued", "running", "quota_waiting") else state)
             self.assertEqual(json.loads(row["source_ids"]), ["one"])
             self.assertEqual(json.loads(row["usage"])["requests"], 1)

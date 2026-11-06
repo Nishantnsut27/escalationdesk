@@ -4,7 +4,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from .config import DATA
-from .migrations import migrate_collections
+from .migrations import migrate_collections, migrate_demo, migrate_sentry
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -69,6 +69,11 @@ def init():
         INSERT OR IGNORE INTO schema_version VALUES(2);
         """)
         migrate_collections(conn)
+        migrate_demo(conn)
+        migrate_sentry(conn)
+        if conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] >= 5:
+            conn.execute("UPDATE collections SET summary=json_set(summary, '$.coverage', 'Server restarted during Sentry import. Retained evidence is partial; retry creates a new snapshot.') WHERE id IN (SELECT collection_id FROM sentry_imports WHERE state IN ('queued','running','rate_limited'))")
+            conn.execute("UPDATE sentry_imports SET state='interrupted', completed_at=?, error='Server restarted. Retry to create a new snapshot.' WHERE state IN ('queued','running','rate_limited')", (now(),))
         for row in conn.execute("SELECT id, usage FROM investigations WHERE state IN ('queued','running','quota_waiting')").fetchall():
             usage = json.loads(row["usage"])
             triage = usage.get("triage")

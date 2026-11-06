@@ -102,3 +102,48 @@ button:focus-visible,summary:focus-visible,select:focus-visible { outline: 2px s
 .source-previews button > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .source-previews small { color: #64748b; overflow-wrap: anywhere; }
 .triage-panel summary:focus-visible, .source-previews button:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+.recorded-banner { display:flex; align-items:center; gap:10px; padding:14px 18px; border:1px solid #cbdcc8; border-radius:8px; background:#edf4e8; color:#365b3d; font-size:13px; }
+.gallery-intro { max-width:720px; color:#687662; line-height:1.8; margin:22px 0; }
+.case-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+.case-card { display:flex; flex-direction:column; text-align:left; padding:24px; border:1px solid #dce4d7; border-radius:12px; background:#fff; color:#304d38; cursor:pointer; min-width:0; transition:box-shadow .2s,transform .2s; }
+.case-card:hover { transform:translateY(-3px); box-shadow:0 8px 24px #20342012; border-color:#9cb896; }
+.case-card-top { display:flex; align-items:center; gap:10px; margin-bottom:24px; }
+.case-card-top svg { margin-left:auto; }
+.case-number { font-family:Consolas,monospace; color:#889980; font-size:15px; }
+.case-card h2 { font-size:19px; line-height:1.4; margin:0 0 12px; }
+.case-card p { font-size:13px; color:#71806b; line-height:1.8; margin:0 0 24px; flex:1; }
+.case-counts { display:flex; flex-direction:column; gap:6px; font-size:12px; padding:14px 0; border-top:1px solid #edf0e9; }
+.case-counts strong { color:#426544; font-size:15px; }
+.case-card footer { font-size:10px; color:#7b8872; line-height:1.6; overflow-wrap:anywhere; }
+.gallery-back { display:flex; align-items:center; gap:8px; margin:20px 0; }
+.case-detail { margin:20px 0; }
+.case-detail .service-map { padding:20px; }
+.lab-intro { padding:28px; background:#254836; color:#edf6e6; border-radius:12px; margin-bottom:22px; }
+.lab-intro h2 { font-size:26px; margin:12px 0; }
+.lab-intro p { max-width:780px; font-size:13px; line-height:1.8; color:#c4d6bc; }
+.lab-controls { display:flex; align-items:end; gap:16px; margin:22px 0; }
+.lab-controls label { display:grid; gap:8px; flex:1; max-width:560px; font-size:12px; }
+.lab-controls select { width:100%; padding:12px; background:#fff; border:1px solid #c8d9c0; border-radius:7px; color:#36523b; }
+.live-workspace .run-progress p { margin:7px 0; font-size:12px; }
+.demo-password { padding:12px; background:#edf4e8; border-radius:6px; font-size:13px; line-height:1.8; }
+.auth-toggle button { white-space:normal; }
+@media(max-width:1200px) { .case-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:760px) { .case-grid { grid-template-columns:1fr; } .lab-controls { flex-direction:column; align-items:stretch; } .lab-intro { padding:20px; } .recorded-banner { align-items:flex-start; line-height:1.6; } .case-card { padding:20px; } }
+
+/* Sentry connections reuse the import and report workspace components. */
+.connections-workspace { display: grid; gap: 24px; }
+.sentry-setup ol { padding-left: 22px; line-height: 1.8; }
+.sentry-setup p, .sentry-import-card p { line-height: 1.6; }
+.sentry-setup a { display: inline-flex; align-items: center; gap: 5px; }
+.sentry-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.sentry-import-form { display: grid; gap: 16px; margin-top: 24px; }
+.sentry-import-form fieldset { border: 1px solid #dce4e1; border-radius: 10px; padding: 12px 16px; }
+.sentry-import-form legend { font-weight: 600; padding: 0 6px; }
+.sentry-import-form .sentry-checkbox { display: inline-flex; align-items: center; gap: 8px; margin: 8px 20px 8px 0; }
+.sentry-checkbox input { width: 16px; height: 16px; accent-color: #15776b; }
+.sentry-checkbox small { color: #63766f; }
+.sentry-import-card { padding: 18px 0; border-top: 1px solid #e3e9e6; }
+.sentry-import-card > div:first-child { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.dataset-coverage { padding-left: 20px; line-height: 1.8; overflow-wrap: anywhere; }
+.connections-workspace select { max-width: 100%; }
+@media (max-width: 700px) { .sentry-actions { align-items: stretch; } .sentry-actions > * { flex: 1 1 180px; } }

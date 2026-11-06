@@ -17,6 +17,7 @@ TEST_DATA.mkdir(parents=True)
 os.environ["DESK_DATA_DIR"] = str(TEST_DATA)
 os.environ["DESK_PORT"] = "8765"
 os.environ["GROQ_API_KEY"] = ""
+os.environ["DESK_PUBLIC_URL"] = ""  # This isolated runtime uses loopback HTTP, not the operator's HTTPS tunnel.
 
 import httpx
 from backend.investigator import EvidenceTools, rule_report, validate_report
@@ -27,7 +28,7 @@ class LocalProductTests(unittest.TestCase):
     def setUpClass(cls):
         cls.log = (TEST_DATA / "launcher.log").open("w")
         cls.server = subprocess.Popen([sys.executable, "-m", "backend.launcher"], cwd=ROOT,
-            env=os.environ.copy(), stdin=subprocess.PIPE, stdout=cls.log, stderr=subprocess.STDOUT,
+            env={**os.environ, "DESK_ENABLE_LAB": "1"}, stdin=subprocess.PIPE, stdout=cls.log, stderr=subprocess.STDOUT,
             text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         cls.addClassCleanup(cls.cleanup_runtime)
         cls.base = "http://127.0.0.1:8765"

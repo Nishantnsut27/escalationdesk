@@ -170,9 +170,14 @@ def parse_logs(content, default_service="unknown"):
                     payload[key] = candidate
                 else:
                     counts["invalid_fields"] += 1
-        for key in ("name", "downstream", "status"):
+        for key in ("name", "downstream", "status", "span_op", "exception_type"):
             if isinstance(obj.get(key), str) and len(obj[key]) <= 160:
                 payload[key] = obj[key]
+        if "exception_handled" in obj:
+            if isinstance(obj["exception_handled"], bool):
+                payload["exception_handled"] = obj["exception_handled"]
+            elif obj["exception_handled"] is not None:
+                counts["invalid_fields"] += 1
         for key in ("duration_ms", "timeout_ms", "http_status", "pool_capacity", "pool_in_use",
                     "requests", "failures", "acquisition_failures", "last_latency_ms"):
             if key not in obj:

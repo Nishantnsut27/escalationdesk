@@ -11,6 +11,7 @@ from argon2.exceptions import VerificationError
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 from . import db
+from .config import PUBLIC_URL
 
 hasher = PasswordHasher()
 dummy_hash = hasher.hash(secrets.token_urlsafe(32))
@@ -21,7 +22,28 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 def public_user(row):
-    return {key: row[key] for key in ("id", "name", "email")}
+    role = db.one("SELECT role FROM account_roles WHERE user_id=?", (row["id"],))
+    return {**{key: row[key] for key in ("id", "name", "email")},
+            "role": "demo" if role else "regular", "read_only": bool(role)}
+
+def is_demo(user):
+    return bool(db.one("SELECT role FROM account_roles WHERE user_id=?", (user["id"],)))
+
+async def demo_login(request):
+    from .demo import DEMO_ID, ready
+    throttle(request)
+    data = await body(request)
+    password = data.get("password", "")
+    user = db.one("SELECT * FROM users WHERE id=?", (DEMO_ID,))
+    if not isinstance(password, str) or len(password) > 128:
+        raise HTTPException(401, "Demo password is incorrect.")
+    if not ready():
+        raise HTTPException(503, "The recorded demo is not installed yet. Regular accounts remain available.")
+    try:
+        await asyncio.to_thread(hasher.verify, user["password_hash"], password)
+    except VerificationError:
+        raise HTTPException(401, "Demo password is incorrect.")
+    return session_response(user, request.cookies.get(COOKIE, ""))
 
 def current(request):
     token = request.cookies.get(COOKIE, "")
@@ -65,7 +87,8 @@ def session_response(user, old_token=""):
     db.execute("DELETE FROM sessions WHERE digest=? OR expires<?", (digest(old_token), time.time()))
     db.execute("INSERT INTO sessions VALUES(?,?,?)", (digest(token), user["id"], time.time() + 86400))
     response = JSONResponse({"user": public_user(user), "csrf": digest(token + ":csrf")})
-    response.set_cookie(COOKIE, token, max_age=86400, httponly=True, samesite="strict", path="/")
+    # OAuth returns through a top-level GET; CSRF still protects every ordinary write.
+    response.set_cookie(COOKIE, token, max_age=86400, httponly=True, samesite="lax" if PUBLIC_URL else "strict", secure=bool(PUBLIC_URL), path="/")
     response.headers["Cache-Control"] = "no-store"
     return response
 

@@ -65,6 +65,14 @@ class ScenarioController:
         return run_id
 
     async def run(self, run_id, owner, scenario):
+        if scenario not in {"pool", "slow", "healthy"}:
+            from .lab import run_live
+            try:
+                await run_live(run_id, owner, scenario)
+            finally:
+                self.active_id = None
+                self.lock.release()
+            return
         final_state = "completed"
         error = None
         incident_id = None
@@ -101,20 +109,24 @@ class ScenarioController:
             error = "Service execution failed. Check runtime health and try again."
         finally:
             db.execute("UPDATE runs SET state='resetting' WHERE id=?", (run_id,))
+            recovery_step = "reset"
             try:
                 await self.control("reset")
                 await asyncio.sleep(4.2 if final_state != "completed" else 0)
+                recovery_step = "evidence collection"
                 self.ingest(run_id, owner)
+                recovery_step = "checkout verification"
                 recovery = await self.client.post(service_url("gateway") + "/checkout",
                     headers={"x-internal-key": INTERNAL_KEY, "x-run-id": run_id}, timeout=10)
                 if recovery.status_code != 200:
                     raise RuntimeError("Recovery failed")
+                recovery_step = "evidence retention"
                 self.ingest(run_id, owner)
                 if incident_id:
                     db.execute("UPDATE incidents SET state='resolved', resolved_at=? WHERE id=?", (db.now(), incident_id))
-            except Exception:
+            except Exception as exc:
                 final_state = "failed"
-                error = "Automatic recovery could not be verified. Restart the local runtime."
+                error = f"Automatic recovery could not be verified ({recovery_step}: {type(exc).__name__}). Restart the local runtime."
             db.execute("UPDATE runs SET state=?, ended_at=?, error=? WHERE id=?",
                        (final_state, db.now(), error, run_id))
             self.active_id = None

@@ -1,0 +1,24 @@
+{
+  "description": "Sanitized shapes from the November 6 Sentry test-app responses. IDs, project ID and timestamps are replaced; request/user/machine data is omitted. service.name and HTTP fields use the corrected Explore query. Missing and malformed variants are constructed by tests.",
+  "project": {"id": "42", "slug": "escalation-test", "name": "Escalation Test"},
+  "errors": [{
+    "eventID": "error-one", "projectID": "42", "dateCreated": "2026-11-06T00:00:01Z",
+    "title": "ValueError: invalid literal for int() with base 10: 'invalid-record'",
+    "entries": [{"type": "exception", "data": {"values": [{
+      "type": "ValueError", "value": "invalid literal for int() with base 10: 'invalid-record'",
+      "mechanism": {"type": "generic", "handled": true},
+      "stacktrace": {"frames": [{"filename": "sentry_test_app.py", "lineNo": 56, "function": "process"}]}
+    }]}}],
+    "contexts": {"trace": {"trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "span_id": "1111111111111111", "parent_span_id": "2222222222222222", "op": "record.parse", "status": "invalid_argument"}},
+    "tags": [{"key": "service.name", "value": "record-processor"}, {"key": "level", "value": "error"}]
+  }],
+  "logs": [
+    {"id": "failure-log", "timestamp": "2026-11-06T00:00:01Z", "message": "Record processing failed: ValueError", "severity": "error", "trace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "span_id": "1111111111111111", "service.name": "record-processor", "http.status_code": null},
+    {"id": "success-log", "timestamp": "2026-11-06T00:00:02Z", "message": "Record processing completed", "severity": "info", "trace": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "span_id": "4444444444444444", "service.name": "record-processor", "http.status_code": null}
+  ],
+  "spans": [
+    {"id": "parse-span", "timestamp": "2026-11-06T00:00:01Z", "trace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "span_id": "1111111111111111", "parent_span": "2222222222222222", "span.description": "Parse integer value", "span.op": "record.parse", "span.duration": 0.65, "span.status": "invalid_argument", "service.name": "record-processor", "http.status_code": null},
+    {"id": "failed-server-span", "timestamp": "2026-11-06T00:00:01Z", "trace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "span_id": "2222222222222222", "parent_span": null, "span.description": "/process", "span.op": "http.server", "span.duration": 1.5, "span.status": "invalid_argument", "service.name": "record-processor", "http.status_code": "422"},
+    {"id": "success-server-span", "timestamp": "2026-11-06T00:00:02Z", "trace": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "span_id": "4444444444444444", "parent_span": null, "span.description": "/process", "span.op": "http.server", "span.duration": 1.0, "span.status": "ok", "service.name": "record-processor", "http.status_code": "200"}
+  ]
+}

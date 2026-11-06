@@ -32,9 +32,11 @@ Desktop.ini
 .env.*
 !.env.example
 
-# Local planning and progress documents
+# Local documentation (README.md is the published guide)
 /prd.md
 /agent.md
 /status.md
 /phase.md
+/docs/
+/demo/v1/README.md
 

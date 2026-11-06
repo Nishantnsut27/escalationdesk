@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--service", choices=["platform", "gateway", "order", "payment"])
     parser.add_argument("--stop", action="store_true", help="Stop the runtime using this data directory.")
     args = parser.parse_args()
-    from .config import PORT, SERVICES, DATA
+    from .config import PORT, SERVICES, DATA, ENABLE_LAB
     stop_file = DATA / "stop.request"
     runtime_file = DATA / "runtime.json"
     if args.stop:
@@ -29,6 +29,18 @@ def main():
         print("Shutdown requested.")
         return
     if args.service:
+        if os.getenv("LAB_LEASE"):
+            def watch_lease():
+                lease = Path(os.environ["LAB_LEASE"])
+                while True:
+                    time.sleep(2)
+                    try:
+                        alive = time.time() - lease.stat().st_mtime < 15
+                    except OSError:
+                        alive = False
+                    if not alive:
+                        os._exit(75)
+            threading.Thread(target=watch_lease, daemon=True).start()
         if args.service == "platform":
             from .api import create_app
             app, port = create_app(), PORT
@@ -37,7 +49,7 @@ def main():
             app, port = create_service(args.service), SERVICES[args.service]
         uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", access_log=False)
         return
-    for port in [PORT, *SERVICES.values()]:
+    for port in [PORT, *(SERVICES.values() if ENABLE_LAB else [])]:
         with socket.socket() as sock:
             try:
                 sock.bind(("127.0.0.1", port))
@@ -67,7 +79,7 @@ def main():
 
     threading.Thread(target=read_commands, daemon=True).start()
     try:
-        for name in ["payment", "order", "gateway", "platform"]:
+        for name in (["payment", "order", "gateway"] if ENABLE_LAB else []) + ["platform"]:
             log = (DATA / f"{name}.log").open("a", encoding="utf-8")
             logs.append(log)
             process = subprocess.Popen([sys.executable, "-m", "backend.launcher", "--service", name],
@@ -93,7 +105,7 @@ def main():
                 else:
                     raise RuntimeError(f"{name} did not become ready on port {port}: {last_readiness}.")
         print(f"Escalation Desk is ready: http://127.0.0.1:{PORT}", flush=True)
-        print("Three independent services are running. Press Ctrl+C to stop.", flush=True)
+        print("Workspace is running. Press Ctrl+C to stop.", flush=True)
         runtime_file.write_text(json.dumps({"pid": os.getpid(), "port": PORT}), encoding="utf-8")
         while not stopping:
             if stop_file.exists():

@@ -18,6 +18,23 @@ const reportFixture = { assessment: 'inconclusive', origin: 'payment', summary: 
   hypotheses: [{ claim: 'Processing may be delayed.', evidence_ids: ['source-b'] }], recommendations: ['Inspect linked spans.'], limitations: ['Deeper cause unknown.'] }
 const investigationFixture = { id: 'saved', engine: 'groq', state: 'completed', created_at: '2026-11-02T00:00:05Z', completed_at: '2026-11-02T00:00:09Z', report: reportFixture, activity: [], usage: { requests: 2, total_tokens: 200 }, supplements: [] }
 
+test('demo reports expose saved sources without supplement creation', async () => {
+  const { ReportView } = await components('src/App.tsx')
+  const html = renderToStaticMarkup(createElement(ReportView, { investigation: investigationFixture, readOnly: true, onOpen() {} }))
+  assert.match(html, /Recorded tool activity|Evidence timeline/)
+  assert.match(html, /Reported hypotheses/)
+  assert.doesNotMatch(html, /Analyze further|Retry further analysis/)
+})
+
+test('demo cards show twelve substantial recorded cases and real counts', async () => {
+  const { CaseCards } = await components('src/scenarios.tsx')
+  const cases = Array.from({ length: 12 }, (_, i) => ({ slug: String(i), title: 'Recorded case ' + i, description: 'Controlled execution', category: 'Deployment', recorded_at: '2026-11-03T00:00:00Z', counts: { log: 501, span: 40, metric: 12 } }))
+  const html = renderToStaticMarkup(createElement(CaseCards, { cases, onSelect() {} }))
+  assert.equal((html.match(/class="case-card"/g) || []).length, 12)
+  assert.equal((html.match(/501 logs/g) || []).length, 12)
+  assert.doesNotMatch(html, /Run scenario|Investigate|Analyze further/)
+})
+
 test('Jev triage stays advisory and separate from the assessed cause and Groq usage', async () => {
   const { ReportView } = await components('src/App.tsx')
   const triage = { requested: true, state: 'completed', category: 'resource_exhaustion', confidence: .6,
@@ -198,14 +215,14 @@ test('import form and coverage make explicit analysis and missing context clear'
   assert.match(coverage, /Conflicting IDs retained/)
   assert.match(coverage, /Malformed records kept as text/)
   assert.match(coverage, /Missing\/invalid timestamps/)
-  assert.match(coverage, /Metrics and traces are unavailable unless supplied/)
+  assert.match(coverage, /No spans were supplied. No metrics were supplied/)
 })
 
 test('imported service maps and timelines do not invent topology, reachability or timestamps', async () => {
   const { ServiceMap } = await components('src/App.tsx')
   const html = renderToStaticMarkup(createElement(ServiceMap, { overview: null, services: ['billing', 'catalog'], evidence: [] }))
   assert.match(html, /billing/)
-  assert.match(html, /not measured for imported logs/)
+  assert.match(html, /not measured in this evidence view/)
   assert.doesNotMatch(html, /gateway|payment|class="connector"/)
   const { orderedEvidence, FullTime } = await components('src/reports.tsx')
   const rows = [{ id: 'untimed-last', kind: 'log', timestamp: null, source_line: 6 },
@@ -213,5 +230,60 @@ test('imported service maps and timelines do not invent topology, reachability o
     { id: 'untimed-first', kind: 'log', timestamp: null, source_line: 2 }]
   assert.deepEqual(orderedEvidence(rows).map(row => row.id), ['dated', 'untimed-first', 'untimed-last'])
   assert.match(renderToStaticMarkup(createElement(FullTime, { value: null })), /Timestamp not recorded/)
+})
+
+test('Sentry setup explains onboarding and pending server configuration', async () => {
+  const { SentrySetup } = await components('src/connections.tsx')
+  const html = renderToStaticMarkup(createElement(SentrySetup, { configured: false, publicUrl: '' }))
+  assert.match(html, /Add Sentry to your application/)
+  assert.match(html, /setup is pending on this server/)
+  assert.match(html, /Connecting or importing never starts model analysis/)
+  assert.match(html, /DSN sends telemetry/)
+})
+
+test('Sentry import cards distinguish active, incomplete and completed snapshots', async () => {
+  const { SentryImportCard } = await components('src/connections.tsx')
+  const item = { id: 'one', state: 'partial', created_at: '2026-11-04T00:00:00Z', parameters: { title: 'Errors' }, progress: { observations: 3 }, error: 'Rate limit exceeded.' }
+  const render = state => renderToStaticMarkup(createElement(SentryImportCard, { item: { ...item, state }, busy: false, onAction() {}, onOpen() {} }))
+  assert.match(render('partial'), /Retry as new snapshot/)
+  assert.match(render('partial'), /3 observations retained/)
+  assert.doesNotMatch(render('partial'), /Cancel import/)
+  assert.match(render('running'), /Cancel import/)
+  assert.doesNotMatch(render('completed'), /Retry as new snapshot|Cancel import/)
+  assert.match(render('completed'), /Review evidence/)
+})
+
+test('Sentry collection coverage retains provenance and dataset access failures', async () => {
+  const { ImportCoverage } = await components('src/imports.tsx')
+  const html = renderToStaticMarkup(createElement(ImportCoverage, { collection: { title: 'Sentry snapshot', source_type: 'sentry', created_at: '2026-11-04T00:00:00Z', summary: {
+    observations: 2, kinds: ['log'], source: { organization: 'sample-org', region: 'eu', start: '2026-11-04T00:00:00Z', end: '2026-11-04T01:00:00Z' },
+    datasets: { 'payment:spans': { state: 'unavailable', reason: 'Permission missing.' } }, coverage: 'Partial Sentry snapshot.', redaction_note: 'Review saved evidence.' } } }))
+  assert.match(html, /Sentry \/ sample-org/)
+  assert.match(html, /payment:spans/)
+  assert.match(html, /Permission missing/)
+  assert.doesNotMatch(html, /pasted text/)
+  assert.match(html, /Older Sentry import/)
+  assert.match(html, /No spans were supplied/)
+  assert.match(html, /Malformed records skipped/)
+})
+
+test('Sentry coverage separates service identity, available spans and legacy snapshots', async () => {
+  const { ImportCoverage } = await components('src/imports.tsx')
+  const { ConnectionRegion } = await components('src/connections.tsx')
+  const { ObservationFields } = await components('src/reports.tsx')
+  const html = renderToStaticMarkup(createElement(ImportCoverage, { collection: {
+    title: 'Corrected snapshot', source_type: 'sentry', summary: { normalization_version: 2, observations: 6,
+      kinds: ['log', 'span'], coverage: 'Bounded snapshot.', redaction_note: 'Redacted.' } } }))
+  assert.match(html, /Recorded spans are available/)
+  assert.match(html, /No metrics were supplied/)
+  assert.match(html, /Service names identify the application/)
+  assert.doesNotMatch(html, /Older Sentry import|Metrics and traces are unavailable/)
+  assert.match(renderToStaticMarkup(createElement(ConnectionRegion, { region: 'eu' })), /European Union \(EU\)/)
+  const fields = renderToStaticMarkup(createElement(ObservationFields, { row: {
+    id: 'source', kind: 'log', service: 'record-processor', source_project: 'escalation-test',
+    exception_type: 'ValueError', exception_handled: false, http_status: 422, span_op: 'http.server' } }))
+  assert.match(fields, /Sentry project \(provenance\)/)
+  assert.match(fields, /Exception handled<\/dt><dd>false/)
+  assert.match(fields, /HTTP response status<\/dt><dd>422/)
 })
 

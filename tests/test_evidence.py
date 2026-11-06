@@ -140,10 +140,84 @@ class EvidenceTests(unittest.TestCase):
         exchange = http_exchanges([response_log, caller])[0]
         self.assertEqual(exchange["event"], "received_downstream_error_response")
         self.assertNotIn("explicit_deadline_ms", exchange)
+        caller_only = http_exchanges([response_log])[0]
+        self.assertEqual(caller_only["event"], "received_downstream_error_response")
+        self.assertEqual(caller_only["sources"], ["timeout"])
+        self.assertNotIn("measured_elapsed_ms_not_deadline", caller_only)
+        self.assertEqual(http_exchanges([{**response_log, "http_status": 200}])[0]["event"], "received_downstream_response")
+        connection_log = {k: v for k, v in log.items() if k not in {"downstream", "timeout_ms"}}
+        connection_log["error_type"] = "ConnectError"
+        connection_span = {**caller, "name": "http.payment"}
+        self.assertEqual(http_exchanges([connection_log, connection_span])[0]["event"], "connection_failed_without_http_response")
         table = evidence_tables(rows)["span"]
         restored = [dict(zip(table["columns"], r)) for r in table["rows"]]
         self.assertEqual(restored[1]["duration_ms"], 4000)
         self.assertEqual(restored[1]["parent_id"], "child-span")
+
+    def test_long_collection_baseline_retains_later_metric_change_and_recovery(self):
+        from backend.investigator import collect_baseline, REPORT_SCHEMA
+        from backend.lab import store_rows, summary
+        rows = [{"id": f"metric-{i}", "kind": "metric", "service": "jobs",
+                 "timestamp": f"2026-11-02T00:{i // 60:02d}:{i % 60:02d}Z",
+                 "requests": i, "queue_depth": 80 if 40 <= i < 80 else 0,
+                 "message": "Queue sample"} for i in range(120)]
+        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+                   ("long", "alice", "Long", "", "paste", db.now(), "long", json.dumps(summary(rows))))
+        store_rows("long", "alice", rows)
+        tools = EvidenceTools(None, "alice", groq=True, collection_id="long")
+        reads = []
+        context, _ = collect_baseline(tools, lambda name, args, result: reads.append(result))
+        self.assertTrue(all(len(encoded(result)) <= TOOL_BYTES for result in reads))
+        payload, supplied = context.payload({"response_format": {"type": "json_schema", "json_schema": {"schema": REPORT_SCHEMA}}},
+                                            "Assess the operational evidence.", "Report")
+        selected = [row for row in rows if row["id"] in supplied]
+        self.assertEqual({row["queue_depth"] for row in selected}, {0, 80})
+        self.assertTrue(any(int(row["id"].split("-")[1]) >= 100 for row in context.records.values()))
+        self.assertLessEqual(len(encoded(payload)), INPUT_BYTES)
+        self.assertEqual(len(db.evidence(None, "alice", collection_id="long", limit=200)), 120)
+
+    def test_status_only_callers_cannot_establish_an_internal_cause(self):
+        from backend.evidence import caller_only_responses
+        received = {"kind": "log", "service": "frontend", "level": "error", "downstream": "catalog", "http_status": 503}
+        completed = {"kind": "log", "service": "frontend", "level": "error", "message": "Request completed", "http_status": 502}
+        self.assertTrue(caller_only_responses([received, completed]))
+        self.assertFalse(caller_only_responses([received, {**completed, "stack_trace": "TypeError: invalid value"}]))
+        self.assertFalse(caller_only_responses([received, {"kind": "span", "service": "catalog", "name": "db.acquire", "status": "error"}]))
+        self.assertFalse(caller_only_responses([received, {**completed, "message": "Database query failed"}]))
+
+    def test_replayed_queries_use_fresh_report_and_enforce_uncertainty(self):
+        from backend.investigator import Investigator
+        from backend.lab import store_rows, summary
+        rows = [{"id": "caller", "kind": "log", "service": "gateway", "timestamp": db.now(),
+                 "level": "error", "message": "Dependency failed", "downstream": "catalog", "http_status": 503}]
+        db.execute("INSERT INTO collections(id,user_id,title,symptom,source_type,created_at,fingerprint,summary) VALUES(?,?,?,?,?,?,?,?)",
+                   ("callers", "alice", "Caller observations", "", "paste", db.now(), "callers", json.dumps(summary(rows))))
+        store_rows("callers", "alice", rows)
+        payloads = []
+        invalid = False
+        def respond(request):
+            payload = json.loads(request.content)
+            payloads.append(payload)
+            self.assertNotIn("tools", payload)
+            schema = payload["response_format"]["json_schema"]["schema"]
+            self.assertEqual(schema["properties"]["assessment"]["enum"], ["inconclusive"])
+            self.assertEqual(schema["properties"]["origin"]["enum"], ["unknown"])
+            return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+                **REPORT, "assessment": "supported" if invalid else "inconclusive", "origin": "gateway" if invalid else "unknown",
+                "affected_services": ["gateway"], "evidence_ids": ["caller"], "hypotheses": []})}}]})
+        async def run():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+                return await Investigator(client).groq(EvidenceTools(None, "alice", groq=True, collection_id="callers"),
+                    lambda *args: None, replay_queries=[{"tool": "search_logs", "arguments": {"service": "gateway"}}])
+        with patch("backend.investigator.GROQ_KEY", "fixture-key"):
+            report, usage = asyncio.run(run())
+            self.assertEqual(report["assessment"], "inconclusive")
+            self.assertEqual(usage["requests"], 1)
+            self.assertIn("replayed", usage["query_mode"])
+            invalid = True
+            with self.assertRaisesRegex(ValueError, "invalid report"):
+                asyncio.run(run())
+        self.assertEqual(len(payloads), 2)
 
     def test_restart_marks_waiting_interrupted_and_keeps_activity(self):
         db.execute("INSERT INTO incidents VALUES(?,?,?,?,?,?,?)", ("incident", "alice", "alice", "title", "resolved", db.now(), db.now()))

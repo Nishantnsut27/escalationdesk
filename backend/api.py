@@ -1,5 +1,6 @@
 import json
 import asyncio
+import sqlite3
 from contextlib import asynccontextmanager
 import httpx
 from starlette.applications import Starlette
@@ -16,12 +17,22 @@ from .supplements import saved_evidence
 from .provider import groq_http_client, jev_http_client
 from .triage import JevTriage
 from .imports import read_import, create_collection, public_collection
+from .catalog import CATALOG, CASE_IDS, ACTIVE
+from . import demo
+from . import sentry_api
+from .sentry_client import SentryClient
+from .sentry_imports import ImportWorker
 
 def owned(request, table, record_id):
     user = auth.current(request)
     row = db.one(f"SELECT * FROM {table} WHERE id=? AND user_id=?", (record_id, user["id"]))
     if not row:
         raise HTTPException(404, "Record not found.")
+    if auth.is_demo(user):
+        field = "investigation_id" if table == "investigations" else "collection_id"
+        scope = row["id"] if table in {"collections", "investigations"} else row.get("collection_id")
+        if not scope or not db.one(f"SELECT slug FROM demo_cases WHERE {field}=?", (scope,)):
+            raise HTTPException(404, "Record not found.")
     return row
 
 def serialize_investigation(row):
@@ -68,7 +79,8 @@ async def collections(request):
 
 async def collection_detail(request):
     row = owned(request, "collections", request.path_params["id"])
-    return JSONResponse({"collection": public_collection(row),
+    sentry_job = db.one("SELECT state FROM sentry_imports WHERE collection_id=? AND user_id=?", (row["id"], row["user_id"]))
+    return JSONResponse({"collection": public_collection(row), "import_state": sentry_job["state"] if sentry_job else None,
         "investigations": [serialize_investigation(item) for item in db.all_rows(
             "SELECT * FROM investigations WHERE collection_id=? AND user_id=? ORDER BY created_at DESC, id DESC",
             (row["id"], row["user_id"]))]})
@@ -102,6 +114,12 @@ async def collection_evidence(request):
 async def start_collection_investigation(request):
     collection = owned(request, "collections", request.path_params["id"])
     auth.csrf(request)
+    if db.one("SELECT id FROM sentry_imports WHERE collection_id=? AND state IN ('queued','running','rate_limited')", (collection["id"],)):
+        raise HTTPException(409, "Wait for the Sentry import to finish before investigating.")
+    if collection["source_type"] == "sentry" and not json.loads(collection["summary"])["observations"]:
+        raise HTTPException(409, "This Sentry snapshot contains no observations to investigate.")
+    if db.one("SELECT id FROM runs WHERE collection_id=? AND state IN ('starting','running','resetting')", (collection["id"],)):
+        raise HTTPException(409, "Wait for the scenario to finish collecting evidence.")
     data = await auth.body(request)
     engine, usage = investigation_options(data)
     if engine == "groq" and not GROQ_KEY:
@@ -150,12 +168,14 @@ async def start_supplement(request):
     return JSONResponse(serialize_supplement(db.one("SELECT * FROM supplements WHERE id=?", (supplement_id,))), status_code=202)
 
 async def health(request):
-    return JSONResponse({"status": "ok", "application": "Escalation Desk"})
+    return JSONResponse({"status": "ok", "application": "Escalation Desk", "demo_available": demo.ready(),
+                         "demo_case_count": demo.case_count()})
 
 async def overview(request):
     user = auth.current(request)
     services = []
-    for name in SERVICES:
+    from .config import ENABLE_LAB
+    for name in SERVICES if ENABLE_LAB else ():
         try:
             response = await request.app.state.local.get(service_url(name) + "/health", timeout=1)
             status = "healthy" if response.status_code == 200 else "unavailable"
@@ -171,13 +191,41 @@ async def overview(request):
 
 async def runs(request):
     user = auth.current(request)
-    rows = db.all_rows("SELECT id,scenario,state,created_at,ended_at,requests,failures,error FROM runs WHERE user_id=? ORDER BY created_at DESC LIMIT 30", (user["id"],))
+    rows = db.all_rows("SELECT id,scenario,state,created_at,ended_at,requests,failures,error,collection_id,stage FROM runs WHERE user_id=? ORDER BY created_at DESC LIMIT 30", (user["id"],))
     return JSONResponse(rows)
 
 async def run_detail(request):
     row = owned(request, "runs", request.path_params["id"])
     return JSONResponse({"run": {k: v for k, v in row.items() if k != "user_id"},
-                         "evidence": db.evidence(row["id"], row["user_id"], limit=200)})
+                         "evidence": db.evidence(row["id"], row["user_id"], limit=200, collection_id=row.get("collection_id"))})
+
+async def scenario_catalog(request):
+    auth.current(request)
+    from .config import ENABLE_LAB
+    if not ENABLE_LAB:
+        raise HTTPException(404, "Live scenarios are not enabled in this workspace.")
+    return JSONResponse(CATALOG)
+
+async def demo_cases(request):
+    if not auth.is_demo(auth.current(request)):
+        raise HTTPException(403, "Sign in to the Demo Account to browse recorded cases.")
+    return JSONResponse([json.loads(row["metadata"]) for row in db.all_rows("SELECT metadata FROM demo_cases ORDER BY position")])
+
+async def run_evidence(request):
+    row = owned(request, "runs", request.path_params["id"])
+    try:
+        params = dict(request.query_params)
+        if set(params) - {"after", "limit"}:
+            raise ValueError()
+        after, limit = int(params.get("after", 0)), int(params.get("limit", 100))
+        if not 0 <= after <= 9223372036854775807 or not 1 <= limit <= 200:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(400, "Use a nonnegative cursor and a limit of 1-200.")
+    field, scope = ("collection_id", row["collection_id"]) if row.get("collection_id") else ("run_id", row["id"])
+    rows = db.all_rows(f"SELECT e.*, a.sequence FROM evidence e JOIN evidence_arrivals a ON a.evidence_id=e.id WHERE e.{field}=? AND e.user_id=? AND a.sequence>? ORDER BY a.sequence LIMIT ?", (scope, row["user_id"], after, limit + 1))
+    page = rows[:limit]
+    return JSONResponse({"evidence": [db.public_evidence(item) for item in page], "next_cursor": page[-1]["sequence"] if page else after, "has_more": len(rows) > limit})
 
 async def incidents(request):
     user = auth.current(request)
@@ -199,9 +247,12 @@ async def evidence_detail(request):
 async def start_scenario(request):
     user = auth.current(request)
     auth.csrf(request)
+    from .config import ENABLE_LAB
+    if not ENABLE_LAB:
+        raise HTTPException(404, "Live scenarios are not enabled in this workspace.")
     await auth.body(request)
     scenario = request.path_params["scenario"]
-    if scenario not in {"healthy", "pool", "slow"}:
+    if scenario not in CASE_IDS | {"healthy"}:
         raise HTTPException(400, "Choose a supported scenario.")
     run_id = await request.app.state.controller.start(user["id"], scenario)
     if run_id is None:
@@ -211,6 +262,9 @@ async def start_scenario(request):
 async def reset_scenario(request):
     user = auth.current(request)
     auth.csrf(request)
+    from .config import ENABLE_LAB
+    if not ENABLE_LAB:
+        raise HTTPException(404, "Live scenarios are not enabled in this workspace.")
     await auth.body(request)
     if not await request.app.state.controller.stop(user["id"]):
         raise HTTPException(404, "You have no active scenario to reset.")
@@ -248,20 +302,32 @@ async def error_response(request, exc):
 @asynccontextmanager
 async def lifespan(app):
     db.init()
-    async with httpx.AsyncClient(trust_env=False) as local, groq_http_client() as provider, jev_http_client() as jev:
+    try:
+        demo.install()
+        app.state.demo_error = None
+    except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
+        app.state.demo_error = "The recorded demo could not be installed. Existing accounts remain available."
+    async with httpx.AsyncClient(trust_env=False) as local, groq_http_client() as provider, jev_http_client() as jev, httpx.AsyncClient(trust_env=False) as sentry_http:
         app.state.local = local
         app.state.controller = ScenarioController(local)
         app.state.investigator = Investigator(provider, triage=JevTriage(jev))
         app.state.investigator.start()
+        app.state.sentry = SentryClient(sentry_http)
+        app.state.sentry_importer = ImportWorker(app.state.sentry)
+        app.state.sentry_importer.start()
         yield
         await app.state.controller.close()
         await app.state.investigator.close()
+        await app.state.sentry_importer.close()
 
 def create_app():
     routes = [
         Route("/api/health", health),
         Route("/api/auth/signup", auth.signup, methods=["POST"]),
         Route("/api/auth/login", auth.login, methods=["POST"]),
+        Route("/api/auth/demo-login", auth.demo_login, methods=["POST"]),
+        Route("/api/demo/cases", demo_cases),
+        Route("/api/scenarios", scenario_catalog),
         Route("/api/auth/logout", auth.logout, methods=["POST"]),
         Route("/api/auth/me", auth.me),
         Route("/api/overview", overview),
@@ -272,6 +338,7 @@ def create_app():
         Route("/api/collections/{id}/investigations", start_collection_investigation, methods=["POST"]),
         Route("/api/runs", runs),
         Route("/api/runs/{id}", run_detail),
+        Route("/api/runs/{id}/evidence", run_evidence),
         Route("/api/incidents", incidents),
         Route("/api/incidents/{id}", incident_detail),
         Route("/api/incidents/{id}/investigations", start_investigation, methods=["POST"]),
@@ -282,11 +349,23 @@ def create_app():
         Route("/api/scenarios/{scenario}/start", start_scenario, methods=["POST"]),
         Route("/api/scenarios/reset", reset_scenario, methods=["POST"]),
     ]
+    routes.extend(sentry_api.routes)
     if (ROOT / "dist").exists():
         routes.append(Mount("/", StaticFiles(directory=ROOT / "dist", html=True)))
     app = Starlette(routes=routes, lifespan=lifespan, exception_handlers={HTTPException: error_response})
 
     async def security(request, call_next):
+        if request.url.path.startswith("/api/") and request.cookies.get(auth.COOKIE):
+            try:
+                user = auth.current(request)
+            except HTTPException:
+                user = None
+            if user and auth.is_demo(user):
+                path = request.url.path
+                session_path = path in {"/api/auth/login", "/api/auth/demo-login", "/api/auth/logout", "/api/auth/me"}
+                read_path = path == "/api/demo/cases" or path.startswith(("/api/collections/", "/api/investigations/", "/api/evidence/"))
+                if not session_path and (request.method not in {"GET", "HEAD"} or not read_path):
+                    return JSONResponse({"error": "Demo Account is read-only. Sign in to a regular account to use this action."}, status_code=403, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
             if origin and origin not in ORIGINS:

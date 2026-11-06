@@ -51,7 +51,9 @@ export function ObservationFields({ row }: { row: Evidence }) {
   const labels: Record<string, string> = { message: 'Message', name: 'Operation', level: 'Log level', status: 'Span outcome',
     started_at: 'Started at', duration_ms: 'Duration (ms)', http_status: 'HTTP response status', timeout_ms: 'Explicit timeout (ms)',
     downstream: 'Downstream service', pool_capacity: 'Pool capacity', pool_in_use: 'Connections in use',
-    trace_id: 'Trace ID', span_id: 'Span ID', parent_id: 'Parent span ID' }
+    trace_id: 'Trace ID', span_id: 'Span ID', parent_id: 'Parent span ID', span_op: 'Span operation type',
+    exception_type: 'Exception type', exception_handled: 'Exception handled',
+    source_project: 'Sentry project (provenance)', source_project_id: 'Sentry project ID', source_dataset: 'Sentry dataset' }
   return <dl className="observation-fields">{Object.entries(row).filter(([key]) => !['id', 'kind', 'service', 'timestamp', 'run_id', 'collection_id', 'original'].includes(key)).map(([key, value]) =>
     <div key={key}><dt>{labels[key] || key.replaceAll('_', ' ')}</dt><dd>{typeof value === 'object' ? JSON.stringify(value) : String(value ?? 'Not recorded')}</dd></div>)}</dl>
 }

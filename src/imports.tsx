@@ -66,25 +66,31 @@ export function ImportCoverage({ collection }: { collection: Collection }) {
   const summary = collection.summary
   return <section className="import-coverage" aria-label="Import coverage">
     <h3>{collection.title}</h3>
-    <p>Imported <FullTime value={collection.created_at} /> from {collection.filename || 'pasted text'}. This is import activity, not a telemetry timestamp.</p>
+    <p>Imported <FullTime value={collection.created_at} /> from {collection.source_type === 'sentry' ? 'Sentry / ' + collection.summary.source?.organization : collection.filename || 'pasted text'}. This is import activity, not a telemetry timestamp.</p>
+    {summary.source && <p>Selected window: <FullTime value={summary.source.start} /> to <FullTime value={summary.source.end} />. Region: {summary.source.region.toUpperCase()}.</p>}
+    {collection.source_type === 'sentry' && <p>Sentry projects identify where evidence was stored. Service names identify the application that emitted it; missing service names remain unknown.</p>}
+    {collection.source_type === 'sentry' && (summary.normalization_version ?? 1) < 2 && <p className="import-guidance" role="status">Older Sentry import: create a fresh import for corrected service names, exception handling and HTTP response metadata. This snapshot and its saved reports are unchanged.</p>}
+    {summary.datasets && <ul className="dataset-coverage">{Object.entries(summary.datasets).map(([name, value]) => <li key={name}><strong>{name}</strong>: {value.state}{value.received !== undefined && ` / ${value.received} received`}{value.reason && ` / ${value.reason}`}</li>)}</ul>}
     {collection.symptom && <p><strong>Reported symptom:</strong> {collection.symptom}</p>}
     <dl>{[
       ['Saved observations', summary.observations], ['Source lines', summary.input_lines], ['Duplicate IDs skipped', summary.duplicates],
-      ['Conflicting IDs retained', summary.conflicting_ids], ['Malformed records kept as text', summary.malformed_records],
+      ['Conflicting IDs retained', summary.conflicting_ids], [collection.source_type === 'sentry' ? 'Malformed records skipped' : 'Malformed records kept as text', summary.malformed_records],
       ['Redactions', summary.redactions], ['Missing/invalid timestamps', summary.missing_timestamps],
       ['Unknown services', summary.missing_services], ['Invalid normalized fields', summary.invalid_fields],
     ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-    <p>{summary.coverage} Available kinds: {summary.kinds.join(', ')}. Metrics and traces are unavailable unless supplied. Missing timestamps remain unknown.</p>
+    <p>{summary.coverage} Available kinds: {summary.kinds.join(', ') || 'none'}.
+      {' '}{summary.kinds.includes('span') ? 'Recorded spans are available; missing trace links remain unknown.' : 'No spans were supplied.'}
+      {' '}{summary.kinds.includes('metric') ? 'Recorded metric samples are available.' : 'No metrics were supplied.'} Missing timestamps remain unknown.</p>
     <p>{summary.redaction_note}</p>
   </section>
 }
 
-type ViewProps = {
+export type ViewProps = {
   overview: Overview | null; onOpen: (id: string) => void; onError: (error: unknown) => void
   ReportComponent: typeof ReportView; MapComponent: typeof ServiceMap; TableComponent: typeof EvidenceTable
 }
 
-function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapComponent, TableComponent }: ViewProps & { id: string }) {
+export function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapComponent, TableComponent }: ViewProps & { id: string }) {
   const [detail, setDetail] = useState<CollectionDetail | null>(null)
   const [historyId, setHistoryId] = useState('')
   const [tab, setTab] = useState('assessment')
@@ -121,6 +127,7 @@ function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapCom
   const investigation = detail?.investigations.find(item => item.id === historyId) || detail?.investigations[0]
   const { scope, error: evidenceError } = useReportEvidence(investigation)
   const investigating = detail?.investigations.some(item => active.includes(item.state))
+  const importing = ['queued', 'running', 'rate_limited'].includes(detail?.import_state || '')
   async function investigate() {
     setBusy(true); setError('')
     try {
@@ -137,7 +144,7 @@ function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapCom
     <MapComponent overview={null} services={detail.collection.summary.services} evidence={scope?.evidence || []} report={investigation?.report} evidenceReady={!!scope} />
     <div className="detail-heading"><h2>Review the evidence</h2><div className="investigate-controls">
       <WorkflowLabel providers={overview?.providers} />
-      <button className="button primary" onClick={investigate} disabled={!overview?.providers.groq || busy || investigating}>{busy || investigating ? <LoaderCircle size={16} className="spin" /> : <Fingerprint size={16} />}{investigating ? 'Investigating' : 'Investigate'}</button>
+      <button className="button primary" onClick={investigate} disabled={!overview?.providers.groq || busy || investigating || importing || !detail.collection.summary.observations}>{busy || investigating ? <LoaderCircle size={16} className="spin" /> : <Fingerprint size={16} />}{importing ? 'Import in progress' : investigating ? 'Investigating' : 'Investigate'}</button>
     </div></div>
     <p className="import-guidance">Investigate sends selected redacted observations to OpenRouter Jev for initial triage, then Groq for an assessment. Missing evidence remains unknown; review the cited sources and limitations.</p>
     {error && <p className="import-error" role="alert">{error}</p>}
@@ -154,7 +161,7 @@ function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapCom
   </section>
 }
 
-export function ImportWorkspace(props: ViewProps) {
+export function ImportWorkspace({ showImport = true, ...props }: ViewProps & { showImport?: boolean }) {
   const [collections, setCollections] = useState<Collection[]>([])
   const [selected, setSelected] = useState('')
   const [error, setError] = useState('')
@@ -165,12 +172,12 @@ export function ImportWorkspace(props: ViewProps) {
     return () => { cancelled = true }
   }, [props.onError])
   return <div className="imports-workspace">
-    <ImportForm onError={props.onError} onImported={value => { setCollections(rows => [value, ...rows.filter(row => row.id !== value.id)]); setSelected(value.id) }} />
+    {showImport && <ImportForm onError={props.onError} onImported={value => { setCollections(rows => [value, ...rows.filter(row => row.id !== value.id)]); setSelected(value.id) }} />}
     {error && <p className="import-error" role="alert">{error}</p>}
     <div className="investigation-workspace">
       <section className="incident-panel"><div className="section-heading"><h2><FileText size={16} />Saved collections</h2><span>{collections.length}</span></div>
         <div className="incident-list">{collections.map(item => <button className={'incident-item ' + (item.id === selected ? 'selected' : '')} key={item.id} onClick={() => setSelected(item.id)}><h3>{item.title}</h3><p>{item.summary.observations} observations · {item.source_type}</p><FullTime value={item.created_at} /></button>)}</div>
-        {!collections.length && <p className="import-guidance">Save logs above to begin. Importing creates no incident or model request.</p>}
+        {!collections.length && <p className="import-guidance">Connect Sentry or import application logs to begin. Analysis starts when you choose Investigate.</p>}
       </section>
       {selected ? <CollectionView key={selected} id={selected} {...props} /> : <section className="detail-panel"><div className="report-empty"><FileText size={28} /><h3>Your application, your evidence.</h3><p>Import logs without knowing the root cause. Review the saved observations, then explicitly investigate.</p></div></section>}
     </div>

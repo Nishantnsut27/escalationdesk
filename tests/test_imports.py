@@ -283,7 +283,7 @@ class MigrationTests(unittest.TestCase):
         with db.connection() as conn:
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
         self.assertEqual(saved_evidence(db.one("SELECT * FROM investigations WHERE id='report'"))["evidence"][0]["id"], "source")
-        self.assertEqual(db.one("SELECT MAX(version) n FROM schema_version")["n"], 3)
+        self.assertEqual(db.one("SELECT MAX(version) n FROM schema_version")["n"], 5)
 
     def test_migration_failure_rolls_back_schema_and_records(self):
         from backend.migrations import migrate_collections

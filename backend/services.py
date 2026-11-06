@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from .config import DATA, INTERNAL_KEY, service_url
 from .telemetry import Span, emit, parent
+from . import sentry_telemetry
 
 class SQLitePool:
     """Two real SQLite connections; acquisition waits are independently bounded."""
@@ -48,6 +49,7 @@ class SQLitePool:
             connection.close()
 
 def create_service(name):
+    sentry_telemetry.initialize(name)
     pool = SQLitePool()
     state = {"delay": 0.0, "requests": 0, "failures": 0, "acquisition_failures": 0, "last_latency_ms": 0.0}
 
@@ -65,6 +67,7 @@ def create_service(name):
             yield
         if name == "payment":
             pool.close()
+        sentry_telemetry.flush()
 
     async def health(request):
         return JSONResponse({"service": name, "status": "healthy"})

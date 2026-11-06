@@ -2,7 +2,7 @@
 
 A working local proof of concept for investigating failures across connected services.
 
-Create an account, import application logs or run a real service scenario, and generate an assessment with links to its source evidence. The normal **Investigate** action uses TypeSafe Jev through OpenRouter for advisory triage, followed by Groq for investigation and reporting. The React interface talks to a persisted Python backend and three independent HTTP service processes.
+Create an account, connect Sentry or import application logs, and generate an assessment with links to its source evidence. The normal **Investigate** action uses TypeSafe Jev through OpenRouter for advisory triage, followed by Groq for investigation and reporting. The React interface talks to a persisted Python backend. Investigations use the evidence you import.
 
 ## Run on this machine
 
@@ -12,7 +12,7 @@ The local dependencies and frontend build are already prepared.
 .\start.ps1
 ~~~
 
-Open **http://127.0.0.1:8000** and create your own account. No shared/default account is created.
+Open **http://127.0.0.1:8020** on this machine and create your own account. **Demo Account** accepts **`Demo@login`** and currently contains five reviewed recordings. The login screen shows the actual available count. The normal workspace opens on saved evidence, with Connections and Import logs as entry points.
 
 Stop with Ctrl+C in the launcher, or from another terminal:
 
@@ -20,27 +20,24 @@ Stop with Ctrl+C in the launcher, or from another terminal:
 .\.venv\Scripts\python.exe -m backend.launcher --stop
 ~~~
 
-The launcher uses ports 8000-8003, checks service readiness and reports startup failures. It does not stop other applications occupying those ports.
+The launcher uses `DESK_PORT` (8020 on this machine), checks readiness and reports startup failures. It does not stop other applications occupying those ports.
 
 ## Try the complete flow
 
-1. Create an account with a password of at least 10 characters.
-2. Run **Connection pool exhaustion** or **Slow Payment processing**.
-3. Wait for three checkout requests and automatic recovery. Downstream spans are collected even when the caller has already timed out.
-4. With provider credentials configured below, select the incident and click **Investigate**.
-5. Read the assessed cause, supported/inconclusive status, recommended checks and limitations. Expand **Initial triage** to review Jev's preliminary classification.
-6. Open a cited observation preview, or inspect the Logs, Traces and Metrics tabs.
-7. Sign out and back in to revisit stored incidents and reports.
+1. Create an account with a password of at least 10 characters, or sign in.
+2. Open Connections to authorize Sentry, or Import logs to upload/paste application observations.
+3. Select the projects and time window for a Sentry import, then review the saved evidence.
+4. Click **Investigate** to run Jev triage followed by Groq.
+5. Review the assessment and limitations, open its citations, and revisit the report after signing in again.
 
-A **Healthy checkout** run captures evidence without creating a false incident. Recent runs remain inspectable. Another account cannot read or reset your runs or access your reports and evidence.
+Demo Account browses saved reports without provider calls. Recorded history retains previous incidents and runs. Live fault controls are disabled in the normal workspace.
 
 ## What is implemented
 
 - Real signup/login/logout with Argon2id password hashes, expiring server-side sessions, HttpOnly cookies, CSRF checks and authentication throttling.
 - Account ownership enforced by the backend for runs, incidents, investigations and evidence.
-- Gateway -> Order -> Payment over actual HTTP, with separate platform and Payment SQLite files.
-- A pool of two real SQLite connections, one-second acquisition timeout and a controller that holds connections to reproduce exhaustion.
-- Four-second Payment processing with a two-second Order timeout.
+- Sentry public-integration OAuth, encrypted account-owned connections, explicit snapshot imports and optional reference-service instrumentation. See [Sentry setup](#sentry-setup) and the verification results below for local and public acceptance.
+- Controlled workload recordings remain available for reviewed demos and offline regression checks. The normal launcher starts only the workspace.
 - Structured JSONL logs, measured operation spans carrying W3C trace/parent IDs, and service metric snapshots.
 - Detection after three consecutive failed requests, one incident per run and verified automatic recovery.
 - Read-only evidence tools, deterministic analysis, evidence-reference validation and saved reports.
@@ -48,6 +45,8 @@ A **Healthy checkout** run captures evidence without creating a false incident. 
 - A quota-aware Groq investigator with compact evidence, strict source citations, automatic wait/resume and saved diagnostics.
 - Owned pasted/file log imports with coverage and redaction details, arbitrary service names and retained source content.
 - Bounded Jev classification and observation priorities through OpenRouter, separate provider usage and visible Groq-only fallback.
+- A read-only twelve-case demo gallery and offline installer; publication awaits completion of the saved-report review described below.
+- Saved collections and previous incident history remain readable; new evidence comes from imports and connections.
 
 The main interface has one investigation action. Deterministic **Evidence rules** and standalone Groq remain available through legacy APIs; comparison scripts provide standalone Jev, Groq and combined modes. Scenario names and controller flags are not passed to the investigator.
 
@@ -57,9 +56,34 @@ This POC uses the user-approved stack retained for the next phases: Python 3.14,
 
 Its connection pool holds real SQLite connections. Its trace exporter records actual operation durations and W3C parent relationships. These are lightweight POC implementations, not SQLAlchemy pooling or the OpenTelemetry SDK.
 
-Phase 6 imports and earlier browser acceptance are complete, user-verified on 2026-11-03. Phase 7 Jev integration is implemented and tested with live OpenRouter access; its new interactive browser checks remain pending. The later roadmap adds a read-only demo with seven saved Groq cases, Sentry imports, evaluation/password recovery, hosting and opt-in Sentry alert investigations. Gateway, Order and Payment remain reference/demo services. There is currently no shared demo login.
+Phase 7 browser acceptance passed, user-verified on 2026-11-03. Phase 8 adds recorded demos and local live scenarios; its new interactive browser acceptance remains separate. The later roadmap adds Sentry imports, evaluation/password recovery, hosting and opt-in Sentry alert investigations. Gateway, Order and Payment remain reference/demo services.
 
-The local planning documents are [prd.md](prd.md), [phase.md](phase.md), [status.md](status.md) and [agent.md](agent.md). They are intentionally ignored by Git and are unavailable in a fresh clone unless supplied separately. SQLAlchemy/OpenTelemetry adoption and additional connectors remain later backlog work. This launcher binds to loopback and is intended for local use.
+## Recorded demos
+
+The twelve controlled recordings cover payment pool exhaustion, slow payment processing, application exception, missing database migration, unavailable dependency, authentication rejection, incomplete evidence, failed rolling deployment, startup configuration failure, expired TLS certificate, API throttling/retries, and a background-job backlog.
+
+**Available now:** [bundle.json](demo/v1/bundle.json) contains five reviewed reports: application exception, missing database migration, rejected upstream authentication, incomplete evidence, and API throttling. Their 2,652 log records and cited evidence are installed automatically. All twelve source recordings remain in [recordings.json](demo/v1/recordings.json); seven reports still need acceptance before publication. Rejected reports are not published. Exporting selected reviewed cases adds them to the existing bundle and rejects changes to published cases before replacing the file.
+
+These are real local HTTP/process/SQLite/TLS/queue executions, labelled as recorded examples. They are not customer production logs or actual cloud deployments. Each case contains at least 500 distinct captured log records; spans and metrics are additional. Open the Assessment, Logs, Traces or Metrics tabs and click any source to inspect the retained observation. Browsing and searching never invokes a model.
+
+The versioned bundle at `demo/v1/bundle.json` installs transactionally on startup without network access. Installation is idempotent, retains recorded IDs/timestamps, and allows additional reviewed cases while rejecting removal or rewriting of already installed cases. The public password is stored as an Argon2id hash. Backend permissions deny demo investigations, supplements, imports, scenario controls and other mutations.
+
+Live scenario controls and the fixed reference topology have been removed from the normal app. Existing saved evidence is retained. Regression tests explicitly enable the development lab with `DESK_ENABLE_LAB=1`; the default is disabled.
+
+Operator preparation is separate from visitor access:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/prepare_demo.py capture --case all
+.\.venv\Scripts\python.exe scripts/verify_demo_captures.py
+.\.venv\Scripts\python.exe scripts/prepare_demo.py analyze --case all --live
+.\.venv\Scripts\python.exe scripts/prepare_demo.py review --case pool --notes-file PATH_TO_REVIEW_NOTES
+.\.venv\Scripts\python.exe scripts/prepare_demo.py export --case exception schema authentication
+.\.venv\Scripts\python.exe scripts/prepare_demo.py install
+~~~
+
+Only `analyze --live` requests providers. Review each actual report and its cited observations before accepting it; export requires a current hash-bound review for every selected case. The exporter automatically retains previously published cases; only newly reviewed cases need to be selected. Preparation retains captures and all provider attempts under `.cache/phase8/v1`. `capture` restores shipped recordings when local snapshots are absent; `capture --recapture` archives the preceding draft capture and report before recording again. `--retry` creates a new analysis attempt. Optional `--reuse-queries` replays an existing read-only query plan for the fixed capture before fresh Jev triage and a fresh Groq report, with separate provenance; normal user investigations still select queries live. `--questions-file` accepts symptom questions, never expected answers or controller flags. `select --case CASE --attempt ID` selects an unchanged retained completed response. Never edit provider output to pass review. This curated gallery is separate from the planned comparative quality benchmark.
+
+Detailed setup, planning and progress documents remain local and are excluded from Git; this README is the published guide. SQLAlchemy/OpenTelemetry adoption and additional connectors remain later backlog work. This launcher binds to loopback and is intended for local use.
 
 ## Import your application logs
 
@@ -72,6 +96,23 @@ Review the retained observations before clicking **Investigate**, which sends bo
 Raw evidence is paged and searchable separately from report sources. Identical imports return the existing collection; new investigations retain earlier attempts. Legacy scenario reports and supplements remain available. SQLite migration 3 adds collections and relaxes the required legacy run/incident links transactionally while preserving stored IDs and report fields.
 
 For browser verification, use [examples/import-check.jsonl](examples/import-check.jsonl), an artificial test fixture. Expected coverage: **4 observations, 1 duplicate skipped, 1 missing timestamp and 1 redaction**. No analysis should start automatically. Open the auth observation to inspect redaction, click Investigate explicitly, inspect triage and cited previews, then sign out/in and revisit the saved result. Investigation consumes configured provider quota.
+
+## Sentry setup
+
+Create a Public Integration in Sentry's **Settings → Developer Settings** with Organization, Project and Issue & Event **Read** permissions. Enable **Verify Install**. Set the redirect URL to `https://YOUR-HOST/api/connections/sentry/callback` and the webhook URL to `https://YOUR-HOST/api/connections/sentry/webhook`. Leave alert actions disabled; only installation lifecycle notifications are handled. Until Sentry approval, the integration is limited to its creating organization.
+
+For local verification, point a temporary HTTPS tunnel at port 8020. Put its exact origin in `DESK_PUBLIC_URL`, and the assigned `SENTRY_APP_SLUG`, `SENTRY_CLIENT_ID` and `SENTRY_CLIENT_SECRET` in ignored `backend/.env`. Remove blank overrides in the root `.env`. Generate the credential-encryption key once, then check configuration:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/configure_sentry.py --generate-key
+.\.venv\Scripts\python.exe scripts/configure_sentry.py
+~~~
+
+Retain `DESK_CONNECTION_KEY` outside the database and reuse it across restarts. Restart the app after configuring it. Sign in through the configured HTTPS origin; sessions then require Secure cookies. In **Connections**, select your organization's actual US or EU region, choose **Connect Sentry**, approve access and run **Check access**.
+
+Send application telemetry to Sentry first; a DSN is for ingestion and does not replace the integration's read authorization. The separate test app runs through `scripts/check_sentry.py` with `SENTRY_TEST_DSN` configured. It sends three controlled integer-parsing failures and three successful requests; verify delivery in the dedicated test project before importing its matching window.
+
+Select authorized projects and datasets, then import up to 24 hours and 5,000 observations. Dataset availability, sampling and partial imports are disclosed with the saved snapshot. Importing and browsing never invoke AI; **Investigate** explicitly sends bounded redacted evidence to Jev and Groq. Local disconnect and Sentry uninstall leave saved evidence and reports readable. Reconnect with **Connect Sentry** when needed.
 
 ## Model provider setup
 
@@ -89,7 +130,9 @@ Jev classifies up to eight representative observation groups across 16 problem f
 
 Jev has a 10 KiB complete-input limit and at most two HTTP attempts within 20 seconds. Its waiting counts toward the investigation's shared 120-second waiting allowance and five-minute deadline. Jev attempts/tokens/cost are recorded separately from Groq's six-attempt budget. Its advisory context uses spare request capacity; it never evicts evidence. If even a compact hint cannot fit, diagnostics disclose its omission.
 
-The investigator first collects a bounded cross-service baseline, then lets Groq query further. Logs, metrics and spans default to 20 records (maximum 50); account, run, service, trace and inclusive time-window filters apply before limits. Original observations remain intact in SQLite. Repeated observations use cited representatives, queried trace relationships are kept together, and the prompt discloses omitted groups. Linked timing comparisons are calculations from supplied telemetry, not a rule-generated diagnosis.
+The investigator first collects a bounded cross-service baseline, including later metric windows for long collections, then lets Groq query further. Logs, metrics and spans default to 20 records (maximum 50); account, run, service, trace and inclusive time-window filters apply before limits. Original observations remain intact in SQLite. Repeated observations use cited representatives, queried trace relationships are kept together, and the prompt discloses omitted groups. Linked timing comparisons are calculations from supplied telemetry, not a rule-generated diagnosis.
+
+For trace-linked imported exceptions, the baseline reads one matching trace and its logs/error events. Later trace selections also collect matching logs. Exception handling, span operation and HTTP status stay available to the report; an HTTP server response is distinct from a downstream response. Independent successful requests remain separate observations. Sentry normalization version 2 keeps project provenance separate from `service.name`; older snapshots need a fresh import for corrected metadata. Their saved evidence, reports, citations and timestamps are preserved.
 
 Each tool result is capped at 4 KiB and the entire serialized request at 10 KiB, including tool/report schemas. Prompts rebuild from deduplicated evidence and compact query summaries. The model uses low reasoning effort and output limits of 1,024 tokens for selecting tools and 2,048 for the separate strict-schema report. Report citation fields are constrained to supplied source IDs and validated again by the backend.
 
@@ -129,7 +172,7 @@ For frontend development, run the backend launcher and, in a second terminal:
 npm run dev
 ~~~
 
-The development frontend at http://127.0.0.1:5173 proxies `/api` to port 8000. Use either `127.0.0.1` or `localhost` consistently for browser sessions.
+The development frontend at http://127.0.0.1:5173 proxies `/api` to `DESK_PORT` from the environment or root `.env`, defaulting to port 8000 (8020 on this machine). Use either `127.0.0.1` or `localhost` consistently for browser sessions.
 
 ## Verification
 
@@ -139,11 +182,17 @@ npm test
 npm run build
 ~~~
 
-Verified on 2026-11-03: **83 backend tests**, **13 frontend checks** and the production build passed. Jev tests cover strict response validation, input/redaction bounds, retries/deadlines, fallback, separate usage, saved results, ownership and preservation of evidence when advisory hints are added. Live OpenRouter Jev and four frozen Jev/Groq/combined comparisons completed. The earlier reliability milestone also passed two live original reports per failure mechanism and explicit supplement flows.
+November 6 verification passed **123 backend tests**, **19 frontend checks** and the production build. A final focused run passed all **24 Sentry tests**, including diagnostic facts within the 4 KiB tool-result and 10 KiB complete-request limits. The dedicated Sentry app's three errors, twelve logs and twelve spans were retrieved with corrected service identity; live JWT refresh and versioned import deduplication passed. Existing collections, evidence, reports and supplements passed the history-preservation audit.
+
+The latest live Jev/Groq report correctly identifies a handled integer-parsing `ValueError` in `record-processor`, its linked server HTTP 422 response and a separate HTTP 200 request. Its citations support the failure mechanism without inventing another service or claiming recovery. Earlier rejected reports remain unchanged. Broader evaluation in Phase 10 must still address redundant recommendations, unrelated deadline caveats and wording that confuses selected evidence with the full snapshot.
+
+Jev tests cover strict response validation, input/redaction bounds, retries/deadlines, fallback, separate usage, saved results, ownership and preservation of evidence when advisory hints are added. Live OpenRouter Jev and four frozen Jev/Groq/combined comparisons completed. The earlier reliability milestone also passed two live original reports per failure mechanism and explicit supplement flows.
 
 Backend tests start a separate real four-process runtime on ports 8765-8768 with isolated storage under `.cache`. They cover authentication, CSRF, account isolation, both real failure scenarios, healthy traffic, recovery, trace/time filtering before limits, grouped evidence, request-size bounds, citation integrity, quota resumption and budgets, queue limits, restart handling and saved results. Mocked provider checks consume no Groq quota.
 
-Frontend checks cover TypeScript compilation, API CSRF/error handling, imports, triage/fallback rendering, source previews and saved-report states. Earlier browser acceptance was confirmed by the user; the new Phase 7 interactive/visual checks remain pending because the browser automation host is unavailable. API and rendered-component checks do not substitute for browser acceptance.
+Frontend checks cover TypeScript compilation, API CSRF/error handling, imports, triage/fallback rendering, source previews, saved-report states, Sentry regions and coverage/provenance/older-import labels. The user confirmed Phase 9 browser checks, including sign-in and retained-report retrieval, local disconnect, reauthorization and Sentry uninstall. A real signed uninstall notification and a later installation notification were received. Final connection restoration still needs reconciliation: the user reported a successful reconnect, but the last database check showed both connections disconnected. Phase 8 interactive/visual acceptance remains separate. Browser results are user-verified because the automation host is unavailable.
+
+Local Phase 9 acceptance permits Phase 10 password recovery, broader accuracy evaluation and outstanding demo acceptance. External Sentry acceptance follows Phase 11 deployment of React on **Vercel** and Python on **Render**, with persistent SQLite and verified HTTPS sessions. Hosted callback/webhook verification, Sentry **Publish** submission, approval and second-organization isolation remain explicitly pending. Submission is not approval. Automatic Sentry investigations remain Phase 12.
 
 Run an explicit live Jev probe:
 
@@ -186,5 +235,5 @@ The script creates a local verification account with its password kept only in m
 
 Local data, dependencies and secrets are ignored by [.gitignore](.gitignore). Stop the runtime before making a backup; retain the platform database and telemetry together. This POC has no verified hosted backup/restore workflow.
 
-Use [status.md](status.md) for current progress, [phase.md](phase.md) for the full implementation checklist, and [agent.md](agent.md) for working rules.
+Detailed progress and working notes are maintained locally and are not included in the repository.
 

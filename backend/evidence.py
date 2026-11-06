@@ -35,7 +35,7 @@ DEFINITIONS = [{"type": "function", "function": {
         "search_logs": "Read retained logs in this investigation; filter messages/levels or page with offset.",
         "get_metrics": "Read metric samples, including pool usage and capacity.",
         "find_traces": "Find measured operation spans; use get_trace for a complete trace.",
-        "get_trace": "Read spans in one trace, preserving parent relationships and timings.",
+        "get_trace": "Read bounded spans in one trace; matching logs/errors are also collected automatically.",
         "get_topology": "Read configured dependencies; these are not proof of observed failures.",
     }[name], "parameters": {"type": "object", "properties": PROPERTIES[name],
                             "required": ["trace_id"] if name == "get_trace" else [],
@@ -116,7 +116,10 @@ class EvidenceTools:
 
 def model_observation(row):
     # Original redacted content remains inspectable; avoid repeating it in model input.
-    return {key: value for key, value in row.items() if key not in {"original", "source_format", "source_id"}}
+    return {key: value for key, value in row.items() if key not in {
+        "original", "source_format", "source_id", "source_line", "source_project_id", "source_connection_id", "source_organization"}
+        and not (row["kind"] == "span" and ((key == "message" and value == row.get("name")) or (key == "level" and value == "unknown")))
+        and not (key == "source_truncated" and value is False)}
 
 # All source observations remain in storage. Grouping retains a real representative,
 # never manufactures a composite source ID or overwrites the original.
@@ -150,7 +153,20 @@ def representatives(rows):
         buckets.setdefault((row["kind"], row["service"]), []).append(row)
     for bucket in buckets.values():
         bucket.sort(key=lambda r: (not (r.get("status") == "error" or r.get("level") == "error"
+                                      or r.get("http_status", 0) >= 400 or r.get("exception_type")
                                       or r.get("duration_ms", 0) >= 2000), r.get("timestamp") or ""))
+        if bucket[0]["kind"] == "metric":
+            keys = {key for row in bucket for key, value in row.items()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and key not in {"requests", "failures", "acquisition_failures", "repetitions", "source_line"}}
+            selected = []
+            for key in sorted(keys):
+                samples = [row for row in bucket if isinstance(row.get(key), (int, float))]
+                for sample in (max(samples, key=lambda r: r[key]), min(samples, key=lambda r: r[key])):
+                    if sample not in selected:
+                        selected.append(sample)
+            bucket[:] = selected + [row for row in bucket if row not in selected]
+            continue
         def state(row):
             return (row.get("status"), row.get("level"), row.get("http_status"),
                     row.get("duration_ms", 0) >= 2000,
@@ -158,8 +174,18 @@ def representatives(rows):
         different = next((i for i, row in enumerate(bucket[1:], 1) if state(row) != state(bucket[0])), None)
         if different is not None:
             bucket.insert(1, bucket.pop(different))
+    def bucket_priority(item):
+        (kind, _), bucket = item
+        if kind == "log" and any(any(key in row for key in ("stack_trace", "timeout_ms", "error", "error_type", "exception_type")) for row in bucket):
+            return 0
+        if kind == "metric" and any(any(isinstance(value, (int, float)) and key not in {
+                "requests", "failures", "acquisition_failures", "repetitions", "source_line"}
+                for key, value in row.items()) for row in bucket):
+            return 1
+        return {"log": 2, "metric": 3, "span": 4}[kind]
+    ordered = sorted(buckets.items(), key=bucket_priority)
     return [bucket[i] for i in range(max((len(b) for b in buckets.values()), default=0))
-            for bucket in buckets.values() if i < len(bucket)]
+            for _, bucket in ordered if i < len(bucket)]
 
 def compact(rows, budget, priority=()):
     groups = [row for row in rows if row["id"] in priority]
@@ -208,19 +234,34 @@ def http_exchanges(rows):
     spans = {(r.get("trace_id"), r.get("span_id")): r for r in rows if r["kind"] == "span"}
     exchanges = []
     for log in rows:
-        if log["kind"] != "log" or not log.get("downstream"):
+        if log.get("span_op") == "http.server" and "http_status" in log:
+            exchanges.append({"event": "generated_server_response", "service": log["service"],
+                              "response_status": log["http_status"], "trace_id": log.get("trace_id"),
+                              "sources": [log["id"]]})
             continue
-        span = spans.get((log.get("trace_id"), log.get("span_id")))
-        if span is None or not log.get("trace_id") or not log.get("span_id") or "duration_ms" not in span:
+        if log["kind"] != "log":
+            continue
+        span = spans.get((log["trace_id"], log["span_id"])) if log.get("trace_id") and log.get("span_id") else None
+        downstream = log.get("downstream")
+        if (not downstream and span and not span.get("span_op") and log["service"] != "unknown" and span.get("service") == log["service"]
+                and span.get("name", "").startswith("http.") and span["name"] not in {"http.server", "http.client"}):
+            downstream = span["name"][5:]
+        if not downstream:
             continue
         if "http_status" in log:
-            event = {"event": "received_downstream_error_response", "response_status": log["http_status"]}
+            event = {"event": "received_downstream_error_response" if log["http_status"] >= 400 else "received_downstream_response",
+                     "response_status": log["http_status"]}
         elif "timeout_ms" in log:
             event = {"event": "caller_timeout", "explicit_deadline_ms": log["timeout_ms"]}
+        elif log.get("error_type") in {"ConnectError", "ConnectTimeout"}:
+            event = {"event": "connection_failed_without_http_response", "error_type": log["error_type"]}
         else:
             continue
-        exchanges.append({"caller": log["service"], "downstream": log["downstream"], **event,
-                          "measured_elapsed_ms_not_deadline": span["duration_ms"], "sources": [log["id"], span["id"]]})
+        exchange = {"caller": log["service"], "downstream": downstream, **event, "sources": [log["id"]]}
+        if span and log.get("trace_id") and log.get("span_id") and "duration_ms" in span:
+            exchange.update(measured_elapsed_ms_not_deadline=span["duration_ms"])
+            exchange["sources"].append(span["id"])
+        exchanges.append(exchange)
     return exchanges[:4]
 
 def evidence_tables(records):
@@ -232,6 +273,18 @@ def evidence_tables(records):
             tables[kind] = {"columns": columns, "rows": [[r.get(k) for k in columns] for r in rows]}
     return tables
 
+
+def caller_only_responses(records):
+    """Recognize the narrow status-only log contract, without inferring a cause."""
+    rows = list(records)
+    if not rows or any(row["kind"] != "log" for row in rows):
+        return False
+    errors = [row for row in rows if row.get("level") == "error" or row.get("http_status", 0) >= 400]
+    return bool(errors) and any(row.get("downstream") for row in errors) and all(
+        not any(row.get(key) for key in ("stack_trace", "error", "error_type", "exception"))
+        and (row.get("downstream") or row.get("message", "").lower() in {"request completed", "checkout request completed"})
+        for row in errors)
+
 class EvidenceContext:
     def __init__(self, tools):
         self.tools = tools
@@ -239,6 +292,7 @@ class EvidenceContext:
         self.queries = []
         self.topology = None
         self.trace_sources = set()
+        self.selected_trace = None
         self.triage = None
         self.triage_included = "not_requested"
 
@@ -247,8 +301,10 @@ class EvidenceContext:
             self.records.update({r["id"]: r for r in result.get("records", [])})
             if "configured_edges" in result:
                 self.topology = result
-            if name == "get_trace" and result.get("records"):
-                self.trace_sources = {r["id"] for r in result["records"]}
+            if name == "get_trace":
+                self.selected_trace = args["trace_id"]
+            if self.selected_trace:
+                self.trace_sources = {r["id"] for r in self.records.values() if r.get("trace_id") == self.selected_trace}
         self.queries.append({"tool": name, "arguments": args,
                              "returned": len(result.get("records", [])) if isinstance(result, dict) else len(result),
                              "omitted_groups": result.get("omitted_groups", 0) if isinstance(result, dict) else 0,
@@ -256,19 +312,43 @@ class EvidenceContext:
 
     def payload(self, base, system, instruction, budget=INPUT_BYTES):
         self.triage_included = "omitted_to_preserve_evidence" if self.triage else "not_available"
+        # Query arguments help select the next tool, but final reports need the
+        # observations. Keep the complete query history in saved activity.
+        recent = [] if "response_format" in base else self.queries[-6:]
+        priority = set(self.trace_sources)
+        # Keep one independently successful HTTP observation alongside a failing
+        # selected trace. It is counterevidence to blanket failure, not recovery.
+        selected = [r for r in self.records.values() if r["id"] in self.trace_sources]
+        if any(r.get("http_status", 0) >= 400 or r.get("exception_type") for r in selected):
+            success = next((r for r in self.records.values() if r.get("trace_id") and r["trace_id"] != self.selected_trace
+                            and 200 <= r.get("http_status", 0) < 400), None)
+            if success:
+                priority.add(success["id"])
         evidence_budget = budget
         while evidence_budget >= 0:
-            evidence = compact(list(self.records.values()), evidence_budget, self.trace_sources)
-            context = {"recent_queries": self.queries[-6:],
-                       "earlier_queries_summarized": max(0, len(self.queries) - 6),
+            evidence = compact(list(self.records.values()), evidence_budget, priority)
+            context = {"recent_queries": {
+                           "columns": ["tool", "arguments", "returned", "omitted_groups", "query_limit_reached"],
+                           "rows": [[q.get(k) for k in ("tool", "arguments", "returned", "omitted_groups", "query_limit_reached")]
+                                    for q in recent]},
+                       "earlier_queries_summarized": len(self.queries) - len(recent),
                        "query_counts": {name: sum(q["tool"] == name for q in self.queries) for name in TOOL_NAMES},
                        "evidence": {**{k: v for k, v in evidence.items() if k != "records"},
-                                    "tables": evidence_tables(evidence["records"])}, "topology": self.topology,
+                                    "tables": evidence_tables(evidence["records"]),
+                                    "supplied_trace_count": len({row["trace_id"] for row in evidence["records"] if row.get("trace_id")})}, "topology": self.topology,
                        "measured_timing_comparisons": timing_comparisons(evidence["records"]),
                        "observed_http_exchanges": http_exchanges(evidence["records"])}
             if self.tools.collection:
+                summary = json.loads(self.tools.collection["summary"])
+                coverage = {k: v for k, v in summary.items() if k not in {"redaction_note", "input_bytes", "input_lines", "source", "datasets"}
+                            and (v != 0 or k == "observations")}
+                if "source" in summary:
+                    coverage["source"] = {k: v for k, v in summary["source"].items() if k not in {"connection_id", "projects"}}
+                if "datasets" in summary:
+                    coverage["datasets"] = {name: {k: v for k, v in value.items() if k not in {"cursor", "pages"}}
+                                            for name, value in summary["datasets"].items()}
                 context["import"] = {"symptom_claim": self.tools.collection["symptom"],
-                                     "coverage": json.loads(self.tools.collection["summary"])}
+                                     "coverage": coverage}
             payload = {**base, "messages": [{"role": "system", "content": system},
                 {"role": "user", "content": instruction + "\nOperational data: " + encoded(context).decode()}]}
             supplied = sorted({row["id"] for row in evidence["records"]})
@@ -294,14 +374,6 @@ class EvidenceContext:
                     for label, value in (("full", hint), ("compact", compact_hint), ("focus", focus_hint)):
                         augmented = deepcopy(payload)
                         augmented["messages"][1]["content"] += "\nAdvisory initial triage: " + encoded(value).decode()
-                        if len(encoded(augmented)) > budget:
-                            # Repeated query-field names are expendable; source observations are not.
-                            lean_context = {**context, "recent_queries": {
-                                "columns": ["tool", "arguments", "returned", "omitted_groups", "query_limit_reached"],
-                                "rows": [[q.get(k) for k in ("tool", "arguments", "returned", "omitted_groups", "query_limit_reached")]
-                                         for q in self.queries[-6:]]}}
-                            augmented["messages"][1]["content"] = (instruction + "\nOperational data: " + encoded(lean_context).decode()
-                                                                  + "\nAdvisory initial triage: " + encoded(value).decode())
                         if len(encoded(augmented)) <= budget:
                             payload = augmented
                             self.triage_included = label

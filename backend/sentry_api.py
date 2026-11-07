@@ -58,7 +58,10 @@ async def start(request):
     data = await auth.body(request)
     if set(data) - {"region"} or data.get("region") not in {"us", "eu"}:
         raise HTTPException(400, "Choose the Sentry organization's US or EU data region.")
-    if str(request.base_url).rstrip("/") != config.PUBLIC_URL:
+    # Vercel forwards this browser request to the Render API hostname. Its
+    # Origin identifies the signed-in frontend without trusting forwarded hosts.
+    workspace_origin = request.headers.get("origin") or str(request.base_url).rstrip("/")
+    if workspace_origin != config.PUBLIC_URL:
         raise HTTPException(409, "Open this app at its configured HTTPS address and sign in before connecting Sentry.")
     state = secrets.token_urlsafe(32)
     with db.connection() as conn:

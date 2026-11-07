@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: tracedesk-api
+    runtime: python
+    plan: free
+    branch: main
+    numInstances: 1
+    autoDeployTrigger: 'off'
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn backend.api:create_app --factory --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /api/health
+    domains:
+      - api.tracedesk.nishantraj.me
+    envVars:
+      - key: PYTHON_VERSION
+        value: '3.14.6'
+      - key: DESK_PUBLIC_URL
+        value: https://tracedesk.nishantraj.me
+      - key: DESK_DATABASE_POOL_MAX
+        value: '5'
+      - key: DESK_ENABLE_LAB
+        value: '0'
+      - key: SENTRY_REFERENCE_ENABLED
+        value: '0'
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: JEV_MODEL
+        value: typesafe/jev-1.14
+      - key: DESK_DATABASE_URL
+        sync: false
+      - key: DESK_CONNECTION_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false

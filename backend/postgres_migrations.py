@@ -1,6 +1,7 @@
 """Transactional platform migrations. Original JSON and timestamps remain text."""
 import hashlib
 import re
+from pathlib import Path
 from .postgres import lock
 
 SCHEMA = """
@@ -179,7 +180,24 @@ END $$;
 SELECT index_failure_tags_v2(id,payload::jsonb) FROM evidence;
 """
 
-MIGRATIONS = ((1, SCHEMA), (2, ACCOUNT_EMAIL), (3, EVIDENCE_ANALYSIS), (4, SIGNATURES_V2))
+# The original deployed v3 predates the timestamp correction included in the
+# published v3. Preserve both exact statements and their recorded checksums;
+# migration 5 brings either installed version to the corrected timestamp index.
+ORIGINAL_EVIDENCE_ANALYSIS = (Path(__file__).parent / "migrations" / "003_evidence_analysis_original.sql").read_text(encoding="utf-8")
+ORIGINAL_EVIDENCE_DIGEST = "9dda71e41785370c24ba74feb4fcfce92e193c7a8ce8b2f59247296470d1936a"
+if hashlib.sha256(ORIGINAL_EVIDENCE_ANALYSIS.encode()).hexdigest() != ORIGINAL_EVIDENCE_DIGEST:
+    raise ValueError("The original PostgreSQL migration 3 has changed.")
+
+EVIDENCE_TIMESTAMPS = EVIDENCE_ANALYSIS[
+    EVIDENCE_ANALYSIS.index("CREATE FUNCTION source_timestamp("):EVIDENCE_ANALYSIS.index("CREATE FUNCTION observation_signature_text(")
+].replace("CREATE FUNCTION source_timestamp(", "CREATE OR REPLACE FUNCTION source_timestamp(") + EVIDENCE_ANALYSIS[
+    EVIDENCE_ANALYSIS.index("CREATE OR REPLACE FUNCTION index_observation()"):EVIDENCE_ANALYSIS.index("UPDATE evidence_index i SET")
+] + """
+UPDATE evidence_index i SET observed_at=source_timestamp(e.timestamp)
+FROM evidence e WHERE e.id=i.evidence_id;
+"""
+
+MIGRATIONS = ((1, SCHEMA), (2, ACCOUNT_EMAIL), (3, EVIDENCE_ANALYSIS), (4, SIGNATURES_V2), (5, EVIDENCE_TIMESTAMPS))
 
 
 def migrate(conn):
@@ -189,8 +207,11 @@ def migrate(conn):
         digest = hashlib.sha256(statement.encode()).hexdigest()
         previous = conn.execute("SELECT digest FROM platform_migrations WHERE version=%s", (version,)).fetchone()
         if previous:
-            if previous['digest'] != digest:
-                raise ValueError("An applied PostgreSQL migration has changed.")
+            compatible = {digest}
+            if version == 3:
+                compatible.add(ORIGINAL_EVIDENCE_DIGEST)
+            if previous['digest'] not in compatible:
+                raise ValueError(f"An applied PostgreSQL migration has changed (version {version}).")
             continue
         # Pipeline mode uses the extended query protocol: submit each statement
         # separately while keeping the PL/pgSQL dollar-quoted function intact.

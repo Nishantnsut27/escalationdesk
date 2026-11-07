@@ -300,7 +300,7 @@ class SupplementTests(unittest.IsolatedAsyncioTestCase):
         db.init()
         db.init()
         self.assertEqual(self.parent(), before)
-        self.assertEqual(db.one("SELECT MAX(version) version FROM platform_migrations")["version"], 2)
+        self.assertEqual(db.one("SELECT MAX(version) version FROM platform_migrations")["version"], 5)
         for state in ("queued", "running", "quota_waiting", "completed", "failed"):
             row = db.one("SELECT * FROM supplements WHERE id=%s", (state,))
             self.assertEqual(row["state"], "interrupted" if state in ("queued", "running", "quota_waiting") else state)

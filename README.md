@@ -117,6 +117,26 @@ Raw evidence is paged and searchable separately from report sources. Identical i
 
 For browser verification, use [examples/import-check.jsonl](examples/import-check.jsonl), an artificial test fixture. Expected coverage: **4 observations, 1 duplicate skipped, 1 missing timestamp and 1 redaction**. No analysis should start automatically. Open the auth observation to inspect redaction, click Investigate explicitly, inspect triage and cited previews, then sign out/in and revisit the saved result. Investigation consumes configured provider quota.
 
+## Hosted deployment
+
+The configured frontend is **https://tracedesk.nishantraj.me** on Vercel; the backend is **https://api.tracedesk.nishantraj.me** on Render with the existing Neon PostgreSQL database. [vercel.json](vercel.json) builds the Vite frontend and forwards `/api/*` to Render, retaining browser sessions on the frontend domain and disabling API rewrite caching. [render.yaml](render.yaml) records the free Python service, one process, custom API domain and `/api/health` check. For an already-created Render service, apply these settings to that service; creating a separate Blueprint would create another backend.
+
+Use the repository root on both hosts. Render's build command is `pip install -r requirements.txt`; its start command is:
+
+~~~bash
+python -m uvicorn backend.api:create_app --factory --host 0.0.0.0 --port $PORT --workers 1
+~~~
+
+Set `PYTHON_VERSION=3.14.6` and `DESK_PUBLIC_URL=https://tracedesk.nishantraj.me` on Render. Keep database, provider, Sentry and Resend credentials on Render only. Reuse `DESK_CONNECTION_KEY` and any separate `DESK_EMAIL_KEY` with the existing database. `backend/.env.render`, when prepared locally, is an ignored private import file; do not publish it. Keep `DESK_ENABLE_LAB=0` and `SENTRY_REFERENCE_ENABLED=0`. Stop the local backend before using the same database on Render; startup marks unfinished work interrupted. Disable automatic backend deploys during setup and deploy when no investigation/import is active. Free Render services can sleep or restart, so background work can be interrupted; saved accounts, sources and reports remain in Neon.
+
+Add `api.tracedesk.nishantraj.me` to the existing Render service's custom domains and use the exact DNS record Render provides. The Vercel domain is `tracedesk.nishantraj.me`. After publishing the configuration and redeploying both services, check `/api/health` on both HTTPS domains before testing demo login, regular accounts, email verification and investigations. Hosted acceptance and backup/restore remain pending until exercised.
+
+The Sentry redirect must be **https://tracedesk.nishantraj.me/api/connections/sentry/callback** because it requires the frontend's session cookie. Its installation webhook may use **https://api.tracedesk.nishantraj.me/api/connections/sentry/webhook**. The Resend delivery webhook is **https://api.tracedesk.nishantraj.me/api/email/webhook**. Use these values in the respective provider accounts after the domains are reachable.
+
+Migration 3 was installed locally before its timestamp correction was added. The migration runner recognizes the exact original and published migration-3 checksums, preserves recorded history, and applies the correction through migration 5. Unknown checksum changes still stop startup. Original evidence timestamps/payloads, reports, ownership, sessions and encrypted connection values are retained; only timestamp indexes are corrected. Never delete migration history or replace its checksums to force a deploy.
+
+For loopback development without email, explicitly override `DESK_PUBLIC_URL` with an empty value; the example configuration now supplies the hosted frontend domain.
+
 ## Sentry setup
 
 Create a Public Integration in Sentry's **Settings → Developer Settings** with Organization, Project and Issue & Event **Read** permissions. Enable **Verify Install**. Set the redirect URL to `https://YOUR-HOST/api/connections/sentry/callback` and the webhook URL to `https://YOUR-HOST/api/connections/sentry/webhook`. Leave alert actions disabled; only installation lifecycle notifications are handled. Until Sentry approval, the integration is limited to its creating organization.

@@ -110,6 +110,29 @@ class SentryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.calls), count)
         self.assertEqual(self.jobs, [])
 
+    async def test_oauth_accepts_frontend_origin_through_render_proxy(self):
+        with patch("backend.api.ORIGINS", {"https://desk.test"}):
+            async with self.client() as client:
+                client.base_url = httpx.URL("https://api.tracedesk.nishantraj.me")
+                client.headers["Origin"] = "https://desk.test"
+                client.headers["Sec-Fetch-Site"] = "same-origin"
+                response, _ = await self.authorize(client)
+                self.assertEqual(response.status_code, 303, response.text)
+                self.assertEqual(response.headers["location"], "https://desk.test/#connections?oauth=connected")
+
+    async def test_oauth_proxy_keeps_origin_and_csrf_restrictions(self):
+        with patch("backend.api.ORIGINS", {"https://desk.test"}):
+            async with self.client() as client:
+                client.base_url = httpx.URL("https://api.tracedesk.nishantraj.me")
+                path = "/api/connections/sentry/start"
+                payload = {"region": "us"}
+                response = await client.post(path, json=payload, headers={"X-Forwarded-Host": "desk.test"})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual((await client.post(path, json=payload, headers={"Origin": "https://untrusted.example"})).status_code, 403)
+                self.assertEqual((await client.post(path, json=payload, headers={"Origin": "https://desk.test", "Sec-Fetch-Site": "cross-site"})).status_code, 403)
+                self.assertEqual((await client.post(path, json=payload, headers={"Origin": "https://desk.test", "X-CSRF-Token": "incorrect"})).status_code, 403)
+        self.assertEqual(self.calls, [])
+
     async def test_oauth_expiry_cross_account_and_cancellation(self):
         async with self.client() as alice, self.client("bob") as bob:
             start = (await alice.post("/api/connections/sentry/start", json={"region": "eu"})).json()

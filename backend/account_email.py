@@ -89,7 +89,7 @@ def consume(digest, purpose, password_hash=None, password=None):
             conn.execute("UPDATE auth_tokens SET consumed_at=%s WHERE user_id=%s AND consumed_at IS NULL", (stamp,user["id"]))
             conn.execute("UPDATE email_jobs SET state='cancelled',payload=NULL,lease_until=NULL WHERE user_id=%s AND kind IN ('verify','reset') AND state IN ('queued','sending')", (user["id"],))
             email_service.enqueue(conn,user,"password_changed",
-                "Your TraceDesk password was changed. All previous sessions were signed out.\n\nIf you did not make this change, use password recovery immediately and contact "+email_service.REPLY_TO+".",
+                "Your TraceDesk password was changed. All previous sessions were signed out.\n\nOpen TraceDesk: "+config.PUBLIC_URL+"/\n\nIf you did not make this change, use password recovery immediately and contact "+email_service.REPLY_TO+".",
                 "password-changed:"+digest,stamp+3600)
         else:
             conn.execute("UPDATE auth_tokens SET consumed_at=%s WHERE digest=%s", (stamp,digest))

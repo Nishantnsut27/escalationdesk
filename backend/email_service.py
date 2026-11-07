@@ -23,6 +23,10 @@ MAX_ATTEMPTS = 5
 logger = logging.getLogger(__name__)
 
 
+def webhook_url():
+    return config.API_URL + "/api/email/webhook" if config.API_URL else None
+
+
 def encryption():
     # Domain separation keeps queued mail ciphertext distinct from Sentry tokens.
     key = os.environ.get("DESK_EMAIL_KEY") or config.CONNECTION_KEY

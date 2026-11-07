@@ -16,6 +16,8 @@ services:
         value: '3.14.6'
       - key: DESK_PUBLIC_URL
         value: https://tracedesk.nishantraj.me
+      - key: DESK_API_URL
+        value: https://api.tracedesk.nishantraj.me
       - key: DESK_DATABASE_POOL_MAX
         value: '5'
       - key: DESK_ENABLE_LAB

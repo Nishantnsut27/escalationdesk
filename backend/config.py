@@ -16,11 +16,18 @@ PORT = int(os.getenv("DESK_PORT", "8000"))
 INTERNAL_KEY = os.getenv("DESK_INTERNAL_KEY", "")
 ORIGINS = {f"http://127.0.0.1:{PORT}", "http://127.0.0.1:5173",
            f"http://localhost:{PORT}", "http://localhost:5173"}
-PUBLIC_URL = os.getenv("DESK_PUBLIC_URL", "").rstrip("/")
+def https_origin(name):
+    value = os.getenv(name, "").rstrip("/")
+    if value:
+        origin = urlsplit(value)
+        if origin.scheme != "https" or not origin.hostname or origin.username or origin.password or origin.path or origin.query or origin.fragment:
+            raise ValueError(f"{name} must be an HTTPS origin, without a path or credentials.")
+    return value
+
+
+PUBLIC_URL = https_origin("DESK_PUBLIC_URL")
+API_URL = https_origin("DESK_API_URL")
 if PUBLIC_URL:
-    public = urlsplit(PUBLIC_URL)
-    if public.scheme != "https" or not public.hostname or public.username or public.password or public.path or public.query or public.fragment:
-        raise ValueError("DESK_PUBLIC_URL must be an HTTPS origin, without a path or credentials.")
     ORIGINS.add(PUBLIC_URL)
 SENTRY_CLIENT_ID = os.getenv("SENTRY_CLIENT_ID", "").strip()
 SENTRY_CLIENT_SECRET = os.getenv("SENTRY_CLIENT_SECRET", "").strip()

@@ -2,6 +2,8 @@
 import hashlib
 import re
 from pathlib import Path
+from psycopg import sql
+from psycopg.errors import QueryCanceled
 from .postgres import lock
 
 SCHEMA = """
@@ -199,6 +201,83 @@ FROM evidence e WHERE e.id=i.evidence_id;
 
 MIGRATIONS = ((1, SCHEMA), (2, ACCOUNT_EMAIL), (3, EVIDENCE_ANALYSIS), (4, SIGNATURES_V2), (5, EVIDENCE_TIMESTAMPS))
 
+BACKFILL_BATCH_SIZE = 64
+TAG_BACKFILLS = {
+    "SELECT index_failure_tags(id,payload::jsonb) FROM evidence": "index_failure_tags",
+    "SELECT index_failure_tags_v2(id,payload::jsonb) FROM evidence": "index_failure_tags_v2",
+}
+
+
+def backfill_evidence(conn, operation):
+    """Keep each classification query bounded without committing partial migrations."""
+    after, batch_size = None, BACKFILL_BATCH_SIZE
+    while True:
+        cursor = sql.SQL("") if after is None else sql.SQL("WHERE id > %s")
+        if operation.startswith("UPDATE evidence_index "):
+            update = operation.replace(
+                "FROM evidence e WHERE e.id=i.evidence_id",
+                "FROM evidence e JOIN batch b ON b.id=e.id WHERE e.id=i.evidence_id RETURNING i.evidence_id",
+            )
+            query = sql.SQL("""
+WITH batch AS (SELECT id FROM evidence {cursor} ORDER BY id LIMIT %s),
+refreshed AS ({update})
+SELECT b.id FROM batch b LEFT JOIN refreshed r ON r.evidence_id=b.id ORDER BY b.id
+""").format(cursor=cursor, update=sql.SQL(update))
+        else:
+            query = sql.SQL("""
+WITH batch AS (
+ SELECT id,payload::jsonb AS document FROM evidence {cursor} ORDER BY id LIMIT %s
+)
+SELECT id,{function}(id,document) FROM batch ORDER BY id
+""").format(cursor=cursor, function=sql.Identifier(operation))
+        params = (batch_size,) if after is None else (after, batch_size)
+        try:
+            # A savepoint lets a cancelled batch shrink and retry. The outer
+            # migration transaction retains all-or-nothing schema and history.
+            with conn.transaction():
+                rows = conn.execute(query, params).fetchall()
+        except QueryCanceled:
+            if batch_size == 1:
+                raise
+            batch_size = max(1, batch_size // 2)
+            continue
+        if not rows:
+            return
+        after = rows[-1]["id"]
+
+
+def migration_statements(statement):
+    """Split SQL while retaining complete dollar-quoted PL/pgSQL functions."""
+    pending, statements = "", []
+    for part in re.split(r'(\$\$.*?\$\$)', statement, flags=re.S):
+        if part.startswith('$$'):
+            pending += part
+            continue
+        fragments = part.split(';')
+        for fragment in fragments[:-1]:
+            pending += fragment
+            if pending.strip():
+                statements.append(pending)
+            pending = ""
+        pending += fragments[-1]
+    if pending.strip():
+        statements.append(pending)
+    return statements
+
+
+def execute_statements(conn, statements):
+    if statements:
+        with conn.pipeline():
+            for statement in statements:
+                conn.execute(statement)
+
+INDEX_BACKFILLS = {
+    part.strip()
+    for source in (ORIGINAL_EVIDENCE_ANALYSIS, EVIDENCE_ANALYSIS, EVIDENCE_TIMESTAMPS)
+    for part in migration_statements(source)
+    if part.strip().startswith("UPDATE evidence_index ")
+}
+
 
 def migrate(conn):
     lock(conn, "platform-migrations")
@@ -213,24 +292,18 @@ def migrate(conn):
             if previous['digest'] not in compatible:
                 raise ValueError(f"An applied PostgreSQL migration has changed (version {version}).")
             continue
-        # Pipeline mode uses the extended query protocol: submit each statement
-        # separately while keeping the PL/pgSQL dollar-quoted function intact.
-        pending = ""
-        statements = []
-        for part in re.split(r'(\$\$.*?\$\$)',statement,flags=re.S):
-            if part.startswith('$$'):
-                pending += part
-                continue
-            fragments = part.split(';')
-            for fragment in fragments[:-1]:
-                pending += fragment
-                if pending.strip():
-                    statements.append(pending)
-                pending = ""
-            pending += fragments[-1]
-        if pending.strip():
-            statements.append(pending)
-        with conn.pipeline():
-            for statement in statements:
-                conn.execute(statement)
-            conn.execute("INSERT INTO platform_migrations(version,digest) VALUES(%s,%s)", (version,digest))
+        pending = []
+        for part in migration_statements(statement):
+            operation = TAG_BACKFILLS.get(part.strip())
+            if part.strip() in INDEX_BACKFILLS:
+                operation = part.strip()
+            if operation:
+                execute_statements(conn, pending)
+                pending = []
+                # Read batch results outside pipeline mode; long-lived result
+                # streams through the Neon proxy can stall pipeline completion.
+                backfill_evidence(conn, operation)
+            else:
+                pending.append(part)
+        execute_statements(conn, pending)
+        conn.execute("INSERT INTO platform_migrations(version,digest) VALUES(%s,%s)", (version, digest))

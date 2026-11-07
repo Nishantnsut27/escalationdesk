@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
-from . import auth, db
+from . import auth, config, db
 from .config import ROOT, GROQ_KEY, JEV_KEY, ORIGINS, SERVICES, service_url
 from .investigator import Investigator
 from .scenarios import ScenarioController
@@ -159,7 +159,9 @@ async def start_supplement(request):
     return JSONResponse(serialize_supplement(supplement), status_code=202 if created else 200)
 
 async def health(request):
-    return JSONResponse({"status": "ok", "application": "TraceDesk", **await asyncio.to_thread(demo.availability)})
+    return JSONResponse({"status": "ok", "application": "TraceDesk",
+        "frontend_url": config.PUBLIC_URL or None, "api_url": config.API_URL or None,
+        "email_webhook_url": email_service.webhook_url(), **await asyncio.to_thread(demo.availability)})
 
 async def overview(request):
     user = auth.current(request)

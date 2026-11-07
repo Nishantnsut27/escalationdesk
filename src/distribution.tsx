@@ -5,9 +5,9 @@ import { ChartContainer, type ChartConfig } from './components/ui/chart'
 import { EmptyState } from './components/common'
 
 const config: ChartConfig = {
-  logs: { label: 'Logs', color: 'var(--primary)' },
+  logs: { label: 'Logs', color: 'var(--chart-logs)' },
   spans: { label: 'Spans', color: 'var(--chart-spans)' },
-  metrics: { label: 'Metrics', color: 'var(--warning)' },
+  metrics: { label: 'Metrics', color: 'var(--chart-metrics)' },
 }
 const percent = (value: number, total: number) => total ? (value / total * 100).toLocaleString(undefined, { maximumFractionDigits: 1 }) + '%' : '0%'
 

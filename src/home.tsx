@@ -41,7 +41,7 @@ const questions = [
 ]
 
 export default function Home() {
-  return <div className="home-page">
+  return <div className="home-surface"><div className="home-page">
     <a className="skip-link" href="#main-content" onClick={event => { event.preventDefault(); document.getElementById('main-content')?.focus() }}>Skip to content</a>
     <header className="home-nav"><Brand /><span className="home-nav-note">Application failure analysis</span><nav aria-label="Public navigation"><a href="#/login">Sign in</a><Button asChild variant="secondary"><a href="#/signup">Create account<ArrowUpRight size={14} /></a></Button></nav></header>
     <main id="main-content" tabIndex={-1}>
@@ -60,5 +60,5 @@ export default function Home() {
       <DataUse />
       <section className="home-cta"><div><span className="eyebrow">/ START A COLLECTION</span><h2>Bring a failure worth investigating.</h2></div><Button asChild><a href="#/signup">Create account<ArrowRight size={15} /></a></Button></section>
     </main><footer className="home-footer"><Brand /><span>Evidence-led investigation.</span><a href="#/privacy">Data use<ArrowUpRight size={13} /></a></footer>
-  </div>
+  </div></div>
 }

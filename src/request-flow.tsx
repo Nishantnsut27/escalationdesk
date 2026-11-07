@@ -57,7 +57,7 @@ function FlowCanvas({ data, selected, onSelect }: { data: FlowData; selected?: s
         nodesDraggable={false} nodesConnectable={false} nodesFocusable={false} edgesFocusable={false} elementsSelectable={false}
         zoomOnScroll={false} panOnScroll={false} preventScrolling={false} colorMode="dark" attributionPosition="bottom-right">
         <Background color="var(--border)" gap={24} size={1} />
-        {nodes.length > 4 && <MiniMap pannable zoomable ariaLabel="Recorded flow minimap" nodeColor={node => node.selected ? 'var(--primary)' : 'var(--border-strong)'} maskColor="#111215bb" />}
+        {nodes.length > 4 && <MiniMap pannable zoomable ariaLabel="Recorded flow minimap" nodeColor={node => node.selected ? 'var(--primary)' : 'var(--border-strong)'} maskColor="var(--flow-mask)" />}
       </ReactFlow>
     </div>
     <p className="small-note flow-help">Follow the request from left to right. Drag to pan, or use Fit graph for the whole request and Readable view for full-size operations. Select an operation to inspect its source.</p>

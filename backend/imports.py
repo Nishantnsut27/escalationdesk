@@ -10,7 +10,6 @@ from . import db
 
 MAX_BYTES = 1024 * 1024
 MAX_RECORDS = 5000
-MAX_RECORD_BYTES = 32768
 MAX_SERVICES = 32
 SECRET_KEY = re.compile(r"(?i)(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|credentials?|private[_-]?key)")
 AUTH_LINK = re.compile(r"(?i)((?:#|%23)auth(?:/|%2f)(?:verify|reset)(?:/|%2f))[a-z0-9_-]{32,128}")
@@ -81,15 +80,15 @@ def _json(text):
     return json.loads(text, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Nonfinite number")))
 
 
-def parse_logs(content, default_service="unknown"):
+def parse_logs(content, default_service="unknown", *, max_bytes=MAX_BYTES):
     if not isinstance(content, str) or not content.strip():
         raise HTTPException(400, "Paste logs or select a nonempty log file.")
     try:
         size = len(content.encode("utf-8"))
     except UnicodeError:
         raise HTTPException(400, "Logs must contain valid UTF-8 text.") from None
-    if size > MAX_BYTES:
-        raise HTTPException(413, "Import at most 1 MiB of log text at a time.")
+    if size > max_bytes:
+        raise HTTPException(413, f"Import at most {max_bytes // (1024 * 1024)} MiB of log text at a time.")
     if "\0" in content:
         raise HTTPException(400, "Binary files are not supported. Import UTF-8 log text.")
     if not isinstance(default_service, str) or not re.fullmatch(r"[\w.-]{1,80}", default_service):
@@ -100,20 +99,22 @@ def parse_logs(content, default_service="unknown"):
     groups = []
     for number, line in enumerate(content.splitlines(), 1):
         if not line.strip():
+            if groups:
+                groups[-1][1] += "\n" + line
+                groups[-1][2] = number
             continue
         if groups and CONTINUATION.search(line) and not line.lstrip().startswith("{") and not STAMP.match(line.lstrip()):
             groups[-1][1] += "\n" + line
+            groups[-1][2] = number
         else:
-            groups.append([number, line])
+            groups.append([number, line, number])
         if len(groups) > MAX_RECORDS:
             raise HTTPException(413, "Import at most 5,000 observations at a time.")
-        if len(groups[-1][1].encode("utf-8")) > MAX_RECORD_BYTES:
-            raise HTTPException(413, "One observation exceeds 32 KiB. Split the input at an observation boundary.")
     rows, source_ids = [], {}
     counts = dict(input_bytes=size, input_lines=len(content.splitlines()), observations=0,
                   duplicates=0, conflicting_ids=0, malformed_records=0, redactions=private_keys,
                   missing_timestamps=0, missing_services=0, invalid_fields=0)
-    for number, raw in groups:
+    for number, raw, end_line in groups:
         obj = None
         if raw.lstrip().startswith(("{", "[")):
             try:
@@ -152,7 +153,7 @@ def parse_logs(content, default_service="unknown"):
         message = obj.get("message", obj.get("msg"))
         if not isinstance(message, str) or not message:
             message = cleaned
-        payload = {"message": message, "original": cleaned, "source_line": number,
+        payload = {"message": message, "original": cleaned, "source_line": number, "source_end_line": end_line,
                    "source_format": "json" if obj else "text"}
         level = str(obj.get("level", obj.get("severity", ""))).lower()
         if not level:
@@ -164,6 +165,8 @@ def parse_logs(content, default_service="unknown"):
             counts["invalid_fields"] += 1
         if value is not None and not recorded_at:
             payload["timestamp_note"] = "Source timestamp missing timezone or invalid; no telemetry time inferred."
+        if "parent_id" not in obj and "parent_span_id" in obj:
+            obj["parent_id"] = obj["parent_span_id"]
         for key in ("trace_id", "span_id", "parent_id", "request_id"):
             if key in obj:
                 candidate = obj[key]
@@ -174,13 +177,17 @@ def parse_logs(content, default_service="unknown"):
         for key in ("name", "downstream", "status", "span_op", "exception_type"):
             if isinstance(obj.get(key), str) and len(obj[key]) <= 160:
                 payload[key] = obj[key]
+        for key in ("stack_trace", "error", "error_type", "exception"):
+            if isinstance(obj.get(key), str):
+                payload[key] = obj[key]
         if "exception_handled" in obj:
             if isinstance(obj["exception_handled"], bool):
                 payload["exception_handled"] = obj["exception_handled"]
             elif obj["exception_handled"] is not None:
                 counts["invalid_fields"] += 1
         for key in ("duration_ms", "timeout_ms", "http_status", "pool_capacity", "pool_in_use",
-                    "requests", "failures", "acquisition_failures", "last_latency_ms"):
+                    "requests", "failures", "acquisition_failures", "last_latency_ms", "cpu_percent", "memory_bytes",
+                    "heap_used_bytes", "heap_max_bytes", "gc_pause_ms", "threads", "file_handles"):
             if key not in obj:
                 continue
             number_value = obj[key]

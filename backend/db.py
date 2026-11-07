@@ -83,12 +83,22 @@ def investigation_scope(investigation):
 
 
 def public_evidence(row):
-    return {**json.loads(row["payload"]),
+    from .signatures import detect, VERSION
+    payload = json.loads(row["payload"])
+    level = str(payload.get("level", "unknown")).lower()
+    level = {"warn": "warning", "fatal": "error", "critical": "error"}.get(level, level)
+    if level not in {"error", "warning", "info", "debug", "trace"}:
+        level = "unknown"
+    if payload.get("parent_span_id") and not payload.get("parent_id"):
+        payload = {**payload, "parent_id": payload["parent_span_id"]}
+    return {**payload, "error_tags": detect(payload), "signature_version": VERSION,
+            "collection_id": row.get("collection_id"), "run_id": row.get("run_id"),
+            "level": level,
             **{key: row[key] for key in ("id", "kind", "service", "timestamp") }}
 
 
 def evidence(run_id, owner, kind=None, service=None, limit=100, trace_id=None,
-             start_time=None, end_time=None, *, collection_id=None, offset=0, query=None, level=None):
+             start_time=None, end_time=None, *, collection_id=None, offset=0, query=None, level=None, request_id=None, error_type=None):
     field, scope = ("collection_id", collection_id) if collection_id else ("run_id", run_id)
     statement = f"SELECT e.* FROM evidence e JOIN evidence_index i ON i.evidence_id=e.id WHERE e.{field}=%s AND e.user_id=%s"
     args = [scope, owner]
@@ -96,13 +106,17 @@ def evidence(run_id, owner, kind=None, service=None, limit=100, trace_id=None,
         if value:
             statement += f" AND e.{key}=%s"
             args.append(value)
-    for key,value in (("trace_id",trace_id),("level",level)):
+    for key,value in (("trace_id",trace_id),("request_id",request_id),("level",level)):
         if value:
             statement += f" AND i.{key}=%s"
             args.append(value)
     if query:
-        statement += " AND strpos(lower(COALESCE(i.message,'')),lower(%s))>0"
+        statement += " AND strpos(lower(COALESCE(i.search_text,'')),lower(%s))>0"
         args.append(query)
+    if error_type:
+        from .signatures import VERSION
+        statement += " AND EXISTS (SELECT 1 FROM evidence_error_tags t WHERE t.evidence_id=e.id AND t.version=%s AND t.signature=%s)"
+        args.extend((VERSION, error_type))
     for value,operator in ((start_time,">="),(end_time,"<=")):
         if value:
             statement += f" AND i.observed_at{operator}%s::timestamptz"

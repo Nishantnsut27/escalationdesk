@@ -4,12 +4,15 @@ from copy import deepcopy
 from . import db
 from .config import MODEL
 from .evidence import INPUT_BYTES, encoded, evidence_tables, timing_comparisons, http_exchanges, model_observation
+from .selection import excerpt, provenance
 
 
 def report_citations(report):
     refs = list(report.get("evidence_ids", []))
     for hypothesis in report.get("hypotheses", []):
         refs.extend(hypothesis.get("evidence_ids", []))
+    for finding in report.get("supporting_evidence", []):
+        refs.extend(finding.get("evidence_ids", []))
     return list(dict.fromkeys(refs))
 
 
@@ -34,6 +37,7 @@ def saved_evidence(investigation):
     unavailable = [ref for ref in ids if ref not in by_id]
     return {"investigation_id": investigation["id"], "evidence": [by_id[ref] for ref in ids if ref in by_id],
             "source_ids": ids, "unavailable_source_ids": unavailable,
+            "supplied_excerpts": json.loads(investigation["supplied_excerpts"]) if investigation.get("supplied_excerpts") else None,
             "coverage": "recorded_supplied" if recorded else "legacy_citations_only",
             "note": ("Recorded sources supplied to this report; other collection/run evidence is excluded." if recorded else
                      "Legacy report: supplied-source metadata was not recorded. Only cited sources are available here.")}
@@ -123,7 +127,7 @@ SYSTEM = (
 
 def supplement_payload(parent, scope, budget=INPUT_BYTES):
     report = json.loads(parent["report"])
-    rows = [model_observation(row) for row in scope["evidence"]]
+    rows = [excerpt(model_observation(row), 1600) for row in scope["evidence"]]
     if not rows:
         raise ValueError("No saved source observations are available for further analysis.")
     essential = set(report_citations(report))
@@ -152,6 +156,9 @@ def supplement_payload(parent, scope, budget=INPUT_BYTES):
                                "omitted_sources": len(rows) - len(ids), "trace_groups_kept_together": True},
                 "evidence": evidence_tables(records), "measured_timing_comparisons": timing_comparisons(records),
                 "observed_http_exchanges": http_exchanges(records)}
+        triage = json.loads(parent["usage"]).get("triage", {})
+        if triage.get("state") == "completed":
+            data["saved_evidence_review"] = {"category": triage.get("category"), "note": "Saved advisory classification; not proof of the cause."}
         return {"model": MODEL, "temperature": .1, "reasoning_effort": "low", "max_completion_tokens": 2048,
                 "response_format": {"type": "json_schema", "json_schema": {
                     "name": "report_supplement", "strict": True, "schema": schema}},
@@ -166,4 +173,5 @@ def supplement_payload(parent, scope, budget=INPUT_BYTES):
         if len(encoded(trial)) <= min(budget, INPUT_BYTES):
             selected += group
             payload = trial
+    scope["last_excerpts"] = provenance(selected, {row["id"]: row for row in scope["evidence"]})
     return payload, {r["id"] for r in selected}

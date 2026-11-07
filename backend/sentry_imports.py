@@ -15,7 +15,7 @@ DATASETS = ("errors", "logs", "spans")
 MAX_RECORDS = 5000
 MAX_BYTES = 10 * 1024 * 1024
 IMPORT_SECONDS = 300
-NORMALIZATION_VERSION = 2
+NORMALIZATION_VERSION = 3
 FIELDS = {
     "logs": ["id", "timestamp", "message", "severity", "trace", "span_id", "service.name", "http.status_code"],
     "spans": ["id", "timestamp", "trace", "span_id", "parent_span", "span.description", "span.op", "span.duration", "span.status", "service.name", "http.status_code"],
@@ -79,12 +79,12 @@ def normalize(source, dataset, project, connection):
                 for exception in entry.get("data", {}).get("values", []):
                     exceptions.append(exception)
                     details.append(f'{exception.get("type", "Exception")}: {exception.get("value", "")}')
-                    for frame in (exception.get("stacktrace") or {}).get("frames", [])[-8:]:
+                    for frame in (exception.get("stacktrace") or {}).get("frames", []):
                         details.append(f'  {frame.get("filename", "?")}:{frame.get("lineNo", "?")} in {frame.get("function", "?")}')
         if details:
             message = str(message) + "\n" + "\n".join(details)
     normalized = {"id": str(source_id), "service": service, "kind": "span" if dataset == "spans" else "log",
-        "timestamp": cleaned.get("timestamp", cleaned.get("dateCreated")), "message": str(message)[:8000],
+        "timestamp": cleaned.get("timestamp", cleaned.get("dateCreated")), "message": str(message),
         "level": cleaned.get("severity", (tags or {}).get("level", "error" if dataset == "errors" else "unknown"))}
     for key, value in {"trace_id": trace, "span_id": cleaned.get("span_id") or context.get("span_id"),
                        "parent_id": cleaned.get("parent_span") or context.get("parent_span_id"),
@@ -111,16 +111,13 @@ def normalize(source, dataset, project, connection):
         duration = cleaned.get("span.duration")
         if isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration) and duration >= 0:
             normalized["duration_ms"] = duration
-    rows, summary = parse_logs(json.dumps(normalized))
+    rows, summary = parse_logs(json.dumps(normalized), max_bytes=MAX_BYTES)
     row = rows[0]
     original = json.dumps(cleaned, ensure_ascii=False)
-    truncated = len(original.encode()) > 24000
-    if truncated:
-        original = original.encode()[:24000].decode("utf-8", errors="ignore") + "\n[SOURCE TRUNCATED]"
     row.update(original=original, source_format="sentry", source_dataset=dataset,
         source_id=str(source_id), source_project_id=project["id"], source_project=project["slug"],
-        source_organization=connection["organization"], source_connection_id=connection["id"], source_truncated=truncated)
-    return row, changes + summary["redactions"], truncated
+        source_organization=connection["organization"], source_connection_id=connection["id"], source_truncated=False)
+    return row, changes + summary["redactions"], False
 
 
 def parameters(data, connection):

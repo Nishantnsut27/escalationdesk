@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { FileText, Fingerprint, LoaderCircle, Upload } from 'lucide-react'
-import { api, ApiError, type Collection, type CollectionDetail, type EvidencePage, type Overview } from './api'
-import { FullTime, useReportEvidence } from './reports'
-import { WorkflowLabel } from './triage'
-import type { ReportView, ServiceMap, EvidenceTable } from './App'
+import { FileText, LoaderCircle, Upload } from 'lucide-react'
+import { api, ApiError, type Collection } from './api'
+import { FullTime } from './reports'
+import { PageHeading, Notice } from './components/common'
+import { navigate } from './routes'
 import { useWritePermission } from './account'
 
-const active = ['queued', 'running', 'quota_waiting']
 export const IMPORT_BYTES = 1024 * 1024
 
 export function ImportForm({ onImported, onError }: { onImported: (value: Collection) => void; onError: (error: unknown) => void }) {
@@ -57,7 +56,7 @@ export function ImportForm({ onImported, onError }: { onImported: (value: Collec
       <label>Log file (optional)<input type="file" accept=".log,.txt,.jsonl" disabled={busy} onChange={e => void chooseFile(e.target.files?.[0])} /></label>
       <label>Log content<textarea value={content} onChange={e => { fileRead.current++; setContent(e.target.value) }} placeholder="Paste JSONL, plain logs or a multiline exception..." rows={7} required disabled={busy} spellCheck={false} /></label>
       <label>What did you observe? (optional)<textarea value={symptom} onChange={e => setSymptom(e.target.value)} maxLength={2000} rows={2} placeholder="For example: sign-in requests started returning 500." disabled={busy} /></label>
-      <p className="report-note">Up to 1 MiB, 5,000 observations and 32 services per import. UTF-8 text only. Common credentials are redacted; review saved content before investigating with Jev and Groq. Importing does not start analysis.</p>
+      <p className="report-note">Up to 1 MiB, 5,000 observations and 32 services per import. UTF-8 text only. Common credentials are redacted; review saved content before sending excerpts for analysis. Importing does not start analysis.</p>
       {error && <p className="import-error" role="alert">{error}</p>}
       <button className="button primary" disabled={!canWrite || busy || !content.trim()}>{busy ? <LoaderCircle size={16} className="spin" /> : <Upload size={16} />}{busy ? 'Importing...' : 'Save logs'}</button>
     </form>
@@ -87,102 +86,6 @@ export function ImportCoverage({ collection }: { collection: Collection }) {
   </section>
 }
 
-export type ViewProps = {
-  overview: Overview | null; onOpen: (id: string) => void; onError: (error: unknown) => void
-  ReportComponent: typeof ReportView; MapComponent: typeof ServiceMap; TableComponent: typeof EvidenceTable
-}
-
-export function CollectionView({ id, overview, onOpen, onError, ReportComponent, MapComponent, TableComponent }: ViewProps & { id: string }) {
-  const canWrite = useWritePermission()
-  const [detail, setDetail] = useState<CollectionDetail | null>(null)
-  const [historyId, setHistoryId] = useState('')
-  const [tab, setTab] = useState('assessment')
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [query, setQuery] = useState('')
-  const [offset, setOffset] = useState(0)
-  const [page, setPage] = useState<EvidencePage | null>(null)
-  const [loading, setLoading] = useState(false)
-  const mounted = useRef(true)
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
-  useEffect(() => {
-    let cancelled = false
-    const update = () => api<CollectionDetail>('/collections/' + id).then(value => {
-      if (!cancelled) setDetail(value)
-    }).catch(e => { if (!cancelled) { setError(e.message); if (e instanceof ApiError && e.status === 401) onError(e) } })
-    void update()
-    const interval = setInterval(update, 1500)
-    return () => { cancelled = true; clearInterval(interval) }
-  }, [id, onError])
-  useEffect(() => {
-    if (tab === 'assessment') return
-    let cancelled = false
-    setLoading(true); setError('')
-    if (offset === 0) setPage(null)
-    const params = new URLSearchParams({ kind: tab, limit: '100', offset: String(offset) })
-    if (query.trim()) params.set('query', query.trim())
-    api<EvidencePage>('/collections/' + id + '/evidence?' + params).then(value => {
-      if (!cancelled) setPage(previous => ({ ...value, evidence: offset ? [...(previous?.evidence || []), ...value.evidence] : value.evidence }))
-    }).catch(e => { if (!cancelled) { setError(e.message); if (e instanceof ApiError && e.status === 401) onError(e) } })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }, [id, tab, offset, query, onError])
-  const investigation = detail?.investigations.find(item => item.id === historyId) || detail?.investigations[0]
-  const { scope, error: evidenceError } = useReportEvidence(investigation)
-  const investigating = detail?.investigations.some(item => active.includes(item.state))
-  const importing = ['queued', 'running', 'rate_limited'].includes(detail?.import_state || '')
-  async function investigate() {
-    setBusy(true); setError('')
-    try {
-      const started = await api<{ id: string }>('/collections/' + id + '/investigations', { engine: 'groq', triage: true })
-      const updated = await api<CollectionDetail>('/collections/' + id)
-      if (mounted.current) { setDetail(updated); setHistoryId(started.id); setTab('assessment') }
-    } catch (e) { if (mounted.current) { setError(e instanceof Error ? e.message : 'Unable to investigate.'); if (e instanceof ApiError && e.status === 401) onError(e) } }
-    finally { if (mounted.current) setBusy(false) }
-  }
-  if (!detail) return <p role={error ? 'alert' : 'status'}>{error || 'Loading saved collection...'}</p>
-  return <section className="detail-panel import-detail">
-    <ImportCoverage collection={detail.collection} />
-    <div className="section-heading"><h2>Services in this collection</h2><span>No live reachability or configured links supplied</span></div>
-    <MapComponent overview={null} services={detail.collection.summary.services} evidence={scope?.evidence || []} report={investigation?.report} evidenceReady={!!scope} />
-    <div className="detail-heading"><h2>Review the evidence</h2><div className="investigate-controls">
-      <WorkflowLabel providers={overview?.providers} />
-      <button className="button primary" onClick={investigate} disabled={!canWrite || !overview?.providers.groq || busy || investigating || importing || !detail.collection.summary.observations}>{busy || investigating ? <LoaderCircle size={16} className="spin" /> : <Fingerprint size={16} />}{importing ? 'Import in progress' : investigating ? 'Investigating' : 'Investigate'}</button>
-    </div></div>
-    <p className="import-guidance">Investigate sends selected redacted observations to OpenRouter Jev for initial triage, then Groq for an assessment. Missing evidence remains unknown; review the cited sources and limitations.</p>
-    {error && <p className="import-error" role="alert">{error}</p>}
-    <div className="detail-tabs">{['assessment', 'log', 'span', 'metric'].map(kind => <button key={kind} className={tab === kind ? 'active' : ''} onClick={() => { setTab(kind); setOffset(0); setPage(null); setQuery('') }}>{({ assessment: 'Assessment', log: 'Logs', span: 'Traces', metric: 'Metrics' })[kind]}</button>)}</div>
-    {tab === 'assessment' ? <>
-      {!!detail.investigations.length && <div className="history-picker"><label htmlFor="import-history">Saved investigation</label><select id="import-history" value={investigation?.id || ''} onChange={e => setHistoryId(e.target.value)}>{detail.investigations.map(item => <option key={item.id} value={item.id}>{item.created_at} · {item.engine} · {item.state}</option>)}</select></div>}
-      <ReportComponent investigation={investigation} onOpen={onOpen} scope={scope} evidenceError={evidenceError} onUpdate={value => setDetail(current => current ? { ...current, investigations: current.investigations.map(item => item.id === value.id ? value : item) } : current)} />
-    </> : <>
-      {tab === 'log' && <label className="collection-search">Search messages across this collection<input value={query} onChange={e => { setQuery(e.target.value); setOffset(0) }} maxLength={200} placeholder="For example: TypeError" /></label>}
-      <TableComponent key={tab + query} kind={tab} evidence={page?.evidence || []} onOpen={onOpen} note="Raw imported evidence. Paged separately from sources used by the selected report. Filtering below searches loaded rows." />
-      {loading && <p className="import-guidance" role="status">Loading evidence...</p>}
-      {!loading && page?.next_offset != null && <button className="button secondary load-more" onClick={() => setOffset(page.next_offset!)}>Load more observations</button>}
-    </>}
-  </section>
-}
-
-export function ImportWorkspace({ showImport = true, ...props }: ViewProps & { showImport?: boolean }) {
-  const [collections, setCollections] = useState<Collection[]>([])
-  const [selected, setSelected] = useState('')
-  const [error, setError] = useState('')
-  useEffect(() => {
-    let cancelled = false
-    api<Collection[]>('/collections').then(rows => { if (!cancelled) { setCollections(rows); setSelected(value => value || rows[0]?.id || '') } })
-      .catch(e => { if (!cancelled) { setError(e.message); if (e instanceof ApiError && e.status === 401) props.onError(e) } })
-    return () => { cancelled = true }
-  }, [props.onError])
-  return <div className="imports-workspace">
-    {showImport && <ImportForm onError={props.onError} onImported={value => { setCollections(rows => [value, ...rows.filter(row => row.id !== value.id)]); setSelected(value.id) }} />}
-    {error && <p className="import-error" role="alert">{error}</p>}
-    <div className="investigation-workspace">
-      <section className="incident-panel"><div className="section-heading"><h2><FileText size={16} />Saved collections</h2><span>{collections.length}</span></div>
-        <div className="incident-list">{collections.map(item => <button className={'incident-item ' + (item.id === selected ? 'selected' : '')} key={item.id} onClick={() => setSelected(item.id)}><h3>{item.title}</h3><p>{item.summary.observations} observations · {item.source_type}</p><FullTime value={item.created_at} /></button>)}</div>
-        {!collections.length && <p className="import-guidance">Connect Sentry or import application logs to begin. Analysis starts when you choose Investigate.</p>}
-      </section>
-      {selected ? <CollectionView key={selected} id={selected} {...props} /> : <section className="detail-panel"><div className="report-empty"><FileText size={28} /><h3>Your application, your evidence.</h3><p>Import logs without knowing the root cause. Review the saved observations, then explicitly investigate.</p></div></section>}
-    </div>
-  </div>
+export function ImportWorkspace() {
+  return <div className="imports-workspace"><PageHeading eyebrow="IMPORT LOGS" title="Import logs">Save a snapshot of application logs. Review its coverage before starting an investigation.</PageHeading><div className="import-layout"><ImportForm onError={() => {}} onImported={collection => navigate('collections', collection.id)} /><aside className="import-help"><span className="row-symbol"><FileText size={22} /></span><h2>A useful starting point</h2><p>Include the error and the observations around it. Trace or request IDs help connect context across services.</p><ol><li>Choose a UTF-8 log file or paste its content.</li><li>Give the collection a name and describe the symptom.</li><li>Inspect your saved evidence, then choose Investigate.</li></ol><Notice>Importing saves evidence. Analysis starts only when you choose Investigate.</Notice><a className="text-link" href="#/connections">Import from Sentry instead</a></aside></div></div>
 }

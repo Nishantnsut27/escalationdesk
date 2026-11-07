@@ -1,6 +1,13 @@
 export class ApiError extends Error {
   constructor(message: string, public status: number) { super(message) }
 }
+export function userMessage(error: unknown, fallback = 'The request could not be completed. Try again.') {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
+  if (/Groq|Jev|OpenRouter|provider|model access|input allowance|tokens|output schema/i.test(message)) {
+    return /quota|rate limit|allowance/i.test(message) ? 'Analysis is waiting for capacity or has reached its allowance. Check the saved attempt before retrying.' : 'Analysis temporarily unavailable. Your evidence is saved; retry the investigation when access is restored.'
+  }
+  return message
+}
 let csrf = ''
 export function setCsrf(value: string) { csrf = value }
 export async function api<T>(path: string, body?: unknown): Promise<T> {
@@ -11,7 +18,10 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
   let data
   try { data = await response.json() }
   catch { throw new ApiError('The server could not complete this request. Please try again shortly.', response.status) }
-  if (!response.ok) throw new ApiError(data.error || 'The request could not be completed.', response.status)
+  if (!response.ok) {
+    if (response.status === 401 && !path.startsWith('/auth/') && typeof window !== 'undefined') window.dispatchEvent(new Event('tracedesk:session-expired'))
+    throw new ApiError(userMessage(data.error || 'The request could not be completed.'), response.status)
+  }
   return data as T
 }
 export type User = { id: string; name: string; email: string; role: 'regular' | 'demo'; read_only: boolean; email_verified: boolean }
@@ -25,6 +35,7 @@ export type Evidence = {
   source_project?: string; source_dataset?: string
   source_line?: number; source_id?: string; original?: string; request_id?: string
   requests?: number; failures?: number; last_latency_ms?: number
+  error_tags?: string[]; signature_version?: string; stack_trace?: string
   [key: string]: unknown
 }
 export type Run = {
@@ -37,13 +48,15 @@ export type Report = {
   assessment: string; summary: string; origin: string; affected_services: string[]
   evidence_ids: string[]; hypotheses: { claim: string; evidence_ids: string[] }[]
   recommendations: string[]; limitations: string[]
+  supporting_evidence?: { finding: string; evidence_ids: string[] }[]
 }
 export type Investigation = {
   id: string; engine: string; state: string; created_at: string; completed_at?: string; error?: string
   report: Report | null; activity: { tool: string; timestamp: string; count: number; evidence_ids?: string[]; omitted_groups?: number; query_limit_reached?: boolean }[]
   supplements?: Supplement[]
+  collection_id?: string | null; incident_id?: string | null; stage?: string | null; supplied_excerpts?: SuppliedRequest[] | null
   usage: { model?: string; duration_ms?: number; total_tokens?: number; requests?: number
-    triage?: Triage
+    triage?: Triage; report_format?: string
     progress?: string; retry_at?: string; wait_reason?: string; quota_wait_seconds?: number
     estimated_input_tokens?: number; supplied_evidence_ids?: string[]; coverage?: string; available_sources?: number
     omitted_sources?: number; unavailable_source_ids?: string[]
@@ -59,16 +72,19 @@ export type Triage = {
   actual_usage?: { input_tokens?: number; output_tokens?: number }; cost?: number; provider?: string
   source_ids?: string[]; input_bytes?: number; started_at?: string; completed_at?: string
   advisory_context?: string
+  supplied_excerpts?: SuppliedExcerpt[]
   coverage?: { baseline_observations: number; represented_groups: number; omitted_groups: number; note: string }
   groups?: { id: string; source_ids: string[]; score?: number; confidence?: number }[]
 }
 export type ReportEvidence = {
   investigation_id: string; evidence: Evidence[]; source_ids: string[]; unavailable_source_ids: string[]
   coverage: 'recorded_supplied' | 'legacy_citations_only'; note: string
+  supplied_excerpts?: SuppliedRequest[] | null
 }
 export type Supplement = {
   id: string; investigation_id: string; state: string; created_at: string; started_at?: string; completed_at?: string
   source_ids: string[]; usage: Investigation['usage']; error?: string
+  stage?: string | null; supplied_excerpts?: SuppliedRequest[] | null
   result: null | {
     summary: string; relationship: 'supports' | 'qualifies' | 'disagrees' | 'cannot_assess'
     explanations: { claim: string; status: 'supported' | 'weakened' | 'unresolved'; supporting_citations: string[]; conflicting_citations: string[] }[]
@@ -97,6 +113,18 @@ export type SentryConnection = { id: string; organization: string; region: 'us' 
 export type SentryImport = { id: string; connection_id: string; collection_id: string; state: string; created_at: string; completed_at: string | null; error: string | null; retry_of: string | null; parameters: { title: string; projects: string[]; datasets: string[]; start: string; end: string }; progress: { observations?: number; datasets?: Record<string, DatasetCoverage>; message?: string; retry_at?: number } }
 export type SentryWorkspace = { configured: boolean; public_url: string; connections: SentryConnection[]; imports: SentryImport[] }
 export type EvidencePage = { collection_id: string; evidence: Evidence[]; next_offset: number | null }
+export type LogPage = EvidencePage & { run_id?: string; offset: number; total: number; unknown_timestamps: number; selected_in_filter?: boolean }
+export type SuppliedExcerpt = { evidence_id: string; record: Evidence; fields: Record<string, { ranges: [number, number][]; source_chars: number; unit: string }>; selection: { source_line?: number; source_end_line?: number; occurrences?: number; selection?: { reason: string; anchor_id?: string }[] } }
+export type SuppliedRequest = { provider: string; attempt: number; phase: string; excerpts: SuppliedExcerpt[]; selection?: { omitted_observations?: number } }
+export type HistogramBucket = { start: string; end: string; count: number; trace: number; debug: number; info: number; warning: number; error: number; unknown: number }
+export type HistogramData = { buckets: HistogramBucket[]; total: number; timed: number; unknown_timestamps: number; note: string }
+export type ErrorSignature = { id: string; family: string; label: string; version: string }
+export type EvidenceSummary = { counts: { collections?: number; observations: number; services: number; error_logs: number; missing_timestamps: number; unknown_time_in_scope: number; missing_services: number; correlated: number; spans: number; metrics: number; note: string }; top_services: { service: string; observations: number }[]; signatures: { signature: string; label: string; observations: number }[]; catalogue: ErrorSignature[] }
+export type InvestigationItem = Pick<Investigation, 'id' | 'collection_id' | 'incident_id' | 'state' | 'stage' | 'created_at'> & { title?: string; assessment?: string; summary?: string; category?: string }
+export type DashboardData = EvidenceSummary & { collections: Collection[]; trend: HistogramData; recent_investigations: InvestigationItem[]; investigation_categories: { category: string; investigations: number }[]; last_import: string | null; connections: Pick<SentryConnection, 'id' | 'organization' | 'state' | 'checked_at' | 'region'>[]; monitoring_note: string }
+export type AnalysisDetails = EvidenceSummary & { collection: Collection | null; run: Pick<Run, 'id' | 'created_at' | 'state'> | null; services: string[]; traces: string[]; requests: string[] }
+export type FlowNode = { id: string; service: string; operation: string; status: string; duration_ms?: number | null; timestamp?: string | null; missing_parent: boolean; ambiguous_parent: boolean; span_id?: string; parent_span_id?: string; trace_id?: string }
+export type FlowData = { mode: 'spans' | 'events' | 'unselected'; nodes: FlowNode[]; edges: { id: string; source: string; target: string; relationship: string }[]; events: Evidence[]; total: number; scope: string; note: string }
 export type Scenario = { id: string; title: string; description: string; category: string }
 export type DemoCase = Omit<Scenario, 'id'> & { slug: string; version: string; recorded_at: string; collection_id: string; investigation_id: string; counts: Record<'log' | 'span' | 'metric', number> }
 

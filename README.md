@@ -12,7 +12,7 @@ The local dependencies and frontend build are already prepared.
 .\start.ps1
 ~~~
 
-Configure the backend settings in [.env.example](.env.example) first. Existing SQLite installations must follow the migration procedure below before restarting this version. Open **http://127.0.0.1:8020** on this machine and create your own account. **Demo Account** accepts **`Demo@login`**; the bundle currently contains six reviewed recordings. The login screen shows the installed count. The normal workspace opens on saved evidence, with Connections and Import logs as entry points.
+Configure the backend settings in [.env.example](.env.example) first. Existing SQLite installations must follow the migration procedure below before restarting this version. Open **http://127.0.0.1:8020** on this machine and create your own account. **Demo Account** accepts **`Demo@login`**; the bundle currently contains six reviewed recordings. The login screen shows the installed count. Verified accounts land on Dashboard. Direct evidence and report links return to their intended destination after authentication.
 
 Stop with Ctrl+C in the launcher, or from another terminal:
 
@@ -28,7 +28,7 @@ The launcher uses `DESK_PORT` (8020 on this machine), checks readiness and repor
 2. Open Connections to authorize Sentry, or Import logs to upload/paste application observations.
 3. Select the projects and time window for a Sentry import, then review the saved evidence.
 4. Click **Investigate** to run Jev triage followed by Groq.
-5. Review the assessment and limitations, open its citations, and revisit the report after signing in again.
+5. Read the concise assessment, supporting findings, next checks and limitations. Citation links open a dedicated log tab directly at the selected source and exact supplied excerpt.
 
 Demo Account browses saved reports without provider calls. Recorded history retains previous incidents and runs. Live fault controls are disabled in the normal workspace.
 
@@ -43,8 +43,8 @@ Demo Account browses saved reports without provider calls. Recorded history reta
 - Structured JSONL logs, measured operation spans carrying W3C trace/parent IDs, and service metric snapshots.
 - Detection after three consecutive failed requests, one incident per run and verified automatic recovery.
 - Read-only evidence tools, deterministic analysis, evidence-reference validation and saved reports.
-- A React/TypeScript dashboard with scenario controls, service topology, incident history, evidence filtering and source-detail dialogs.
-- A quota-aware Groq investigator with compact evidence, strict source citations, automatic wait/resume and saved diagnostics.
+- A dark React/TypeScript evidence dashboard, durable hash routes and dedicated stacked log workspace with severity histograms, chronological events and recorded React Flow span relationships.
+- Typed LangGraph investigation and saved-evidence supplement paths, failure-focused excerpts, strict source citations, bounded quota waits and retained attempts.
 - Owned pasted/file log imports with coverage and redaction details, arbitrary service names and retained source content.
 - Bounded Jev classification and observation priorities through OpenRouter, separate provider usage and visible Groq-only fallback.
 - A read-only demo gallery and offline installer with six published cases. Six additional captured cases are deferred for later report review.
@@ -60,13 +60,15 @@ Its connection pool holds real SQLite connections. Its trace exporter records ac
 
 Phase 7 browser acceptance passed, user-verified on 2026-11-03. Phase 8 adds recorded demos and local live scenarios; its new interactive browser acceptance remains separate. The later roadmap adds Sentry imports, evaluation/password recovery, hosting and opt-in Sentry alert investigations. Gateway, Order and Payment remain reference/demo services.
 
+The current evidence-workspace redesign retains six published demos and the paused 18/36 benchmark. Deployment, automatic alert investigations, additional live/paid evaluation, extra demo publication and live infrastructure monitoring are outside this workstream.
+
 ## Recorded demos
 
 The twelve controlled recordings cover payment pool exhaustion, slow payment processing, application exception, missing database migration, unavailable dependency, authentication rejection, incomplete evidence, failed rolling deployment, startup configuration failure, expired TLS certificate, API throttling/retries, and a background-job backlog.
 
 **In the bundle:** [bundle.json](demo/v1/bundle.json) contains six reviewed reports: application exception, missing database migration, rejected upstream authentication, incomplete evidence, API throttling, and payment pool exhaustion. All twelve source recordings remain in [recordings.json](demo/v1/recordings.json). Slow processing, unavailable dependency, rolling deployment, startup failure, expired TLS and job backlog are deferred; their reports still need acceptance before publication. Rejected reports are retained locally. Exporting reviewed cases adds them to the bundle and rejects changes to previously published cases.
 
-These are real local HTTP/process/SQLite/TLS/queue executions, labelled as recorded examples. They are not customer production logs or actual cloud deployments. Each case contains at least 500 distinct captured log records; spans and metrics are additional. Open the Assessment, Logs, Traces or Metrics tabs and click any source to inspect the retained observation. Browsing and searching never invokes a model.
+These are real local HTTP/process/SQLite/TLS/queue executions, labelled as recorded examples. They are not customer production logs or actual cloud deployments. Each case contains at least 500 distinct captured log records; spans and metrics are additional. Open a recorded assessment and follow its source links into the dedicated log workspace. Expand recorded request flow or the chronological timeline as needed. Browsing and searching never invokes a model.
 
 The versioned bundle at `demo/v1/bundle.json` installs transactionally into PostgreSQL on startup without model-provider calls. Installation is idempotent, retains recorded IDs/timestamps, and allows additional reviewed cases while rejecting removal or rewriting of installed cases. The public password is stored as an Argon2id hash. Backend permissions deny demo investigations, supplements, imports, scenario controls and other mutations.
 
@@ -105,9 +107,9 @@ Detailed setup, planning and progress documents remain local and are excluded fr
 
 ## Import your application logs
 
-Open **Imported logs**, paste text or choose a UTF-8 .log, .txt or .jsonl file, and optionally describe the symptom or provide a default service label. Choose **Save logs** to retain an owned collection. Importing makes no model request and creates no scenario run or failure incident.
+Open **Import logs**, paste text or choose a UTF-8 .log, .txt or .jsonl file, and optionally describe the symptom or provide a default service label. Choose **Save logs** to retain an owned collection. Importing makes no model request and creates no scenario run or failure incident.
 
-Limits are 1 MiB of text, 5,000 observations, 32 services and 32 KiB per observation. JSONL records can supply service, timestamp, level, message, source id and correlation IDs; plain logs and multiline exceptions are also accepted. Supplied span/metric records retain recognized fields. Missing times and relationships stay unknown. The interface discloses malformed records, redactions, duplicates and missing context.
+Limits are 1 MiB of text, 5,000 observations and 32 services. Large individual observations are retained in full within that total input bound; model requests receive explicitly marked excerpts. JSONL records can supply service, timestamp, level, message, source id and correlation IDs; plain logs and multiline exceptions are also accepted. Supplied span/metric records retain recognized fields. Missing times and relationships stay unknown. The interface discloses malformed records, redactions, duplicates and missing context.
 
 Review the retained observations before clicking **Investigate**, which sends bounded evidence to OpenRouter Jev and Groq. Common credential patterns are redacted, but arbitrary sensitive content may remain. Groq uses bounded tools and request budgets; its citations refer only to supplied saved evidence.
 
@@ -148,13 +150,13 @@ Jev classifies up to eight representative observation groups across 16 problem f
 
 Jev has a 10 KiB complete-input limit and at most two HTTP attempts within 20 seconds. Its waiting counts toward the investigation's shared 120-second waiting allowance and five-minute deadline. Jev attempts/tokens/cost are recorded separately from Groq's six-attempt budget. Its advisory context uses spare request capacity; it never evicts evidence. If even a compact hint cannot fit, diagnostics disclose its omission.
 
-The investigator first collects a bounded cross-service baseline, including later metric windows for long collections, then lets Groq query further. Logs, metrics and spans default to 20 records (maximum 50); account, run, service, trace and inclusive time-window filters apply before limits. Original observations remain intact in PostgreSQL. Repeated observations use cited representatives, queried trace relationships are kept together, and the prompt discloses omitted groups. Linked timing comparisons are calculations from supplied telemetry, not a rule-generated diagnosis.
+The investigator selects explicit failures and symptom matches, preserving multiline exceptions and nested causes. It prefers matching trace/request context across services; otherwise it uses same-service observations within 30 seconds, or five adjacent observations on each side when time is unknown. Measured extremes, relevant spans and independent successful/conflicting observations are retained before repeated errors fill the selection bound. Groq can then request bounded evidence tools. Logs, metrics and spans default to 20 records (maximum 50); account, run, service, trace and inclusive time-window filters apply before limits. Original observations remain intact in PostgreSQL. Repeated observations use cited representatives, queried trace relationships are kept together, and the prompt discloses omitted groups. Linked timing comparisons are calculations from supplied telemetry, not a rule-generated diagnosis.
 
-For trace-linked imported exceptions, the baseline reads one matching trace and its logs/error events. Later trace selections also collect matching logs. Exception handling, span operation and HTTP status stay available to the report; an HTTP server response is distinct from a downstream response. Independent successful requests remain separate observations. Sentry normalization version 2 keeps project provenance separate from `service.name`; older snapshots need a fresh import for corrected metadata. Their saved evidence, reports, citations and timestamps are preserved.
+For trace-linked imported exceptions, the baseline reads one matching trace and its logs/error events. Later trace selections also collect matching logs. Exception handling, span operation and HTTP status stay available to the report; an HTTP server response is distinct from a downstream response. Independent successful requests remain separate observations. Sentry normalization version 3 retains full redacted source content and exception frames, while preserving the version 2 service/HTTP/exception corrections. Older snapshots need a fresh import for the updated normalization. Their saved evidence, reports, citations and timestamps are preserved.
 
 Each tool result is capped at 4 KiB and the entire serialized request at 10 KiB, including tool/report schemas. Prompts rebuild from deduplicated evidence and compact query summaries. The model uses low reasoning effort and output limits of 1,024 tokens for selecting tools and 2,048 for the separate strict-schema report. Report citation fields are constrained to supplied source IDs and validated again by the backend.
 
-The single worker allows four model tool rounds and six actual HTTP attempts, reserving two for the report and its possible retry. Queries that collect no new sources end exploration. A request is retried at most once for 429, temporary server errors or connection failures. Authentication, oversized input and invalid output fail visibly with diagnostics.
+The single worker allows four model tool rounds and six actual HTTP attempts, reserving two for the report and its possible retry. Queries that collect no new sources end exploration. A request is retried at most once for 429, temporary server errors or connection failures. Authentication and input-budget failures remain visible. A report failing structure, length, service or citation validation receives at most one correction within the existing six-attempt allowance; invalid output is never silently truncated or saved as a valid report.
 
 When quota is low, the same investigation enters **quota waiting**. The dashboard shows the reason, expected retry and countdown while retaining completed tool activity and evidence links. The worker uses provider reset/Retry-After timing, or a 60-second fallback when a 429 gives no usable timing. Total waiting is capped at 120 seconds and execution at five minutes, excluding time in the queue. Limits requiring a longer wait produce a clear failure with the next retry time when known. Explicit retry creates a new investigation and retains the earlier attempt; restart marks unfinished waits interrupted.
 
@@ -164,11 +166,19 @@ Both investigation-create APIs accept `{"engine":"groq","triage":true}`. Omittin
 
 ## Saved reports and further analysis
 
-Open a saved investigation to inspect its hypotheses, individual citations and evidence timeline. The timeline uses that report's recorded supplied sources, with a labelled citation-only fallback for older reports. Missing sources/trace links remain visible. Raw run evidence stays in the separate log/trace/metric tabs. The service map separates reported impact, observed errors and current reachability.
+New reports have at most 250 words of explanatory prose: assessed mechanism and impact, supported/inconclusive assessment, cited supporting findings, at most two next checks and two material limitations. At most two competing hypotheses are allowed. Historical reports retain their original wording and are available in expandable details.
+
+Citations open a new tab directly at the selected observation and exact excerpt. A known trace takes precedence over a request ID; absent correlation remains unknown. Source character ranges, source lines and selection metadata are retained per model request. The complete redacted observation remains inspectable. Further-analysis citations identify their own saved excerpts.
+
+The log workspace stacks collection coverage and search/filters, a severity histogram, expandable recorded request flow, an expandable chronological timeline and paginated observations. Exact request/trace, service, severity, time range and detected error signature filters, selection and pagination are preserved in the URL. Reload and browser Back/Forward restore that state. Long stack traces remain searchable and expandable.
+
+Histogram totals use the whole filtered log dataset. Missing or timezone-less timestamps stay out of time buckets and are disclosed separately. Flow edges require matching recorded trace/span/parent IDs; branches, repeated service calls and missing parents remain distinct. Severity/service/time filters do not erase intermediate operations from the labelled full-request flow. Request-only evidence shows ordered events without invented span dependencies.
+
+Dashboard counts are observations from saved snapshots, never unique requests or failure rates. Local, versioned error signatures are separate from Jev's investigation-level categories. An OOM signature does not establish a leak, and a timeout does not explain the underlying slowness. Live infrastructure monitoring awaits a separate telemetry-source decision.
 
 Completed Groq reports offer **Analyze further**. This explicit action reviews the same saved evidence and adds a separate supplement; it makes no telemetry queries and preserves the original report/status/timestamps. Opening or revisiting reports never calls Groq. Supplements can support, qualify, disagree with or be unable to assess the original conclusion. Inspect their citations and limitations; valid source IDs alone do not guarantee correct prose.
 
-The single worker prioritizes fresh investigations over queued supplements. Each supplement has two HTTP attempts at most, a 10 KiB complete request, 2,048 output tokens and the same 120-second waiting/five-minute execution bounds. Original and supplemental usage are shown separately. Duplicate submissions return the existing result; explicit retry after failure/interruption retains the previous attempt.
+The single worker prioritizes fresh investigations over queued supplements. Each supplement has two HTTP attempts at most, a 10 KiB complete request, 2,048 output tokens and the same 120-second waiting/five-minute execution bounds. Original and supplemental usage are retained separately in the saved API records. Duplicate submissions return the existing result; explicit retry after failure/interruption retains the previous attempt.
 
 ## Fresh installation
 
@@ -211,13 +221,14 @@ Existing accounts retain their passwords and saved history; migration sends no b
 
 ~~~powershell
 py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade "pip>=26.2"
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 npm ci
 npm run build
 .\start.ps1
 ~~~
 
-These are the standard fresh-install commands and require registry access. This session used existing local packages because network downloads were unavailable; a clean online installation has not been verified.
+These commands require registry access. They were verified on 2026-11-07 in an isolated clean checkout with fresh Python/npm dependencies, the documented launcher and a disposable schema on the separate test database. Startup, sign-in, saved reports and restart recovery passed.
 
 For frontend development, run the backend launcher and, in a second terminal:
 
@@ -229,13 +240,19 @@ The development frontend at http://127.0.0.1:5173 proxies `/api` to `DESK_PORT` 
 
 ## Verification
 
+The results below describe the verified local candidate. Updated test fixtures and the browser harness remain local and are not included in this application-only publication.
+
 ~~~powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
 npm test
 npm run build
 ~~~
 
-The PostgreSQL migration rehearsal and working cutover matched all 18 original tables exactly. Post-cutover checks verified unchanged historical content, TLS, all six published reports and cited sources, account isolation and demo browsing without provider calls. All 144 backend tests have passing results across the full run and targeted reruns. The initial full run exposed development-lab write latency and encountered database connection failures; batching fixed the lab issue, and affected tests subsequently passed. Twenty-three frontend tests and the production build passed. The user confirmed verification/reset email delivery and reports the account/browser flows working; automated rendered/accessibility checks were unavailable. Live Resend delivery-receipt verification awaits the webhook signing secret.
+Local readiness passed on 2026-11-07: **164 backend tests**, **29 frontend tests**, TypeScript/production build and **21 isolated browser checks**, with zero reported axe accessibility violations or browser page errors. Browser checks cover accounts, file/paste imports, explicit investigation, report citations, unchanged original reports after Analyze further, all five filters/search/history, chart totals, and desktop/tablet/mobile keyboard and reduced-motion behavior. Loading/error/empty/disabled states and short-source focus were also inspected. Providers and account email delivery were mocked/captured; no live model requests were made.
+
+Historical migrations and clean startup/restart preserve original evidence, reports, IDs, timestamps, ownership and source relationships. The earlier PostgreSQL cutover matched all 18 original tables. `python -m pip check`, npm audit and the Python dependency audit passed with zero known vulnerabilities after upgrading PyJWT and pip. Existing credentials, the working database, six demos and benchmark-v1 were preserved. The local candidate is ready to begin deployment setup; hosting and hosted email/Sentry acceptance remain separate work.
+
+Earlier live-provider observations are retained below as historical evidence, not results of this local-readiness pass.
 
 The latest live Jev/Groq report correctly identifies a handled integer-parsing `ValueError` in `record-processor`, its linked server HTTP 422 response and a separate HTTP 200 request. Its citations support the failure mechanism without inventing another service or claiming recovery. Earlier rejected reports remain unchanged. Broader evaluation in Phase 10 must still address redundant recommendations, unrelated deadline caveats and wording that confuses selected evidence with the full snapshot.
 
@@ -243,7 +260,7 @@ Jev tests cover strict response validation, input/redaction bounds, retries/dead
 
 Backend tests require network access to `DESK_TEST_DATABASE_URL` and create disposable schemas on the separate test project. Runtime checks start four local processes on ports 8765–8768; reference workload files live under `.cache`. They cover authentication, CSRF, account isolation, real failure scenarios, healthy traffic, recovery, evidence limits, citations, quota handling, restart and saved results. Mocked provider checks consume no Groq quota.
 
-Frontend checks cover TypeScript compilation, API handling, imports, triage/fallback rendering, sources, saved reports, Sentry metadata and account-link states. The user confirmed Phase 9 browser checks, including disconnect, reauthorization and uninstall. The latest EU connection is connected with no recorded access error (checked November 6 at 08:40 UTC). User browser reports remain distinct from automated rendering evidence.
+Frontend checks cover TypeScript compilation, API handling, imports, evidence review/fallback rendering, sources, saved reports, Sentry metadata and account-link states. Rendered acceptance used an isolated PostgreSQL fixture with mocked providers and locally captured account email. All 21 browser checks have passing evidence across the full invocation and affected account/demo rerun. The original failed runs and final results remain in `.cache/local-readiness-20261107/`; the browser harness and updated regression tests are retained locally. Hosted email/Sentry behavior remains separately unverified.
 
 External Sentry acceptance follows Phase 11 deployment of React on **Vercel** at `tracedesk.nishantraj.me` and Python on **Render** at `api.tracedesk.nishantraj.me`, with Neon PostgreSQL and verified HTTPS sessions. Hosted callback/webhook verification, Sentry submission/approval and second-organization isolation remain pending. Automatic investigations and incident emails remain Phase 12.
 

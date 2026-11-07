@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Cable, ExternalLink, LoaderCircle, RefreshCw, Unplug, Download } from 'lucide-react'
-import { api, ApiError, type SentryConnection, type SentryImport, type SentryWorkspace } from './api'
-import { CollectionView, type ViewProps } from './imports'
+import { api, type SentryConnection, type SentryImport, type SentryWorkspace } from './api'
+import { PageHeading } from './components/common'
+import { navigate } from './routes'
+import { poll } from './poll'
 import { FullTime } from './reports'
 import { useWritePermission } from './account'
 
@@ -34,7 +36,7 @@ export function SentryImportCard({ item, busy, onAction, onOpen }: { item: Sentr
     {item.progress.message && <p role="status">{item.progress.message}</p>}
     {item.progress.retry_at && <p>Next retry: <FullTime value={new Date(item.progress.retry_at * 1000).toISOString()} /></p>}
     <div className="sentry-actions"><button className="button secondary" onClick={onOpen}>Review evidence</button>
-      {active.includes(item.state) && <button className="button secondary" disabled={busy} onClick={() => onAction('cancel')}>Cancel import</button>}
+      {active.includes(item.state) && <button className="button secondary" disabled={!canWrite || busy} onClick={() => onAction('cancel')}>Cancel import</button>}
       {incomplete.includes(item.state) && <button className="button secondary" disabled={!canWrite || busy} onClick={() => onAction('retry')}>Retry as new snapshot</button>}
     </div>
   </article>
@@ -65,11 +67,10 @@ function ImportForm({ connection, disabled, onSubmit }: { connection: SentryConn
   </form>
 }
 
-export function ConnectionsWorkspace(props: ViewProps) {
+export function ConnectionsWorkspace() {
   const canWrite = useWritePermission()
   const [data, setData] = useState<SentryWorkspace | null>(null)
   const [selected, setSelected] = useState('')
-  const [collection, setCollection] = useState('')
   const [region, setRegion] = useState('us')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -81,13 +82,11 @@ export function ConnectionsWorkspace(props: ViewProps) {
   const fail = useCallback((e: unknown) => {
     if (!mounted.current) return
     setError(e instanceof Error ? e.message : 'Sentry request failed.')
-    if (e instanceof ApiError && e.status === 401) props.onError(e)
-  }, [props.onError])
+  }, [])
   useEffect(() => {
     mounted.current = true
-    void refresh().catch(fail)
-    const timer = setInterval(() => void refresh().catch(fail), 2000)
-    return () => { mounted.current = false; clearInterval(timer) }
+    const stop = poll(() => refresh().catch(fail), 4000)
+    return () => { mounted.current = false; stop() }
   }, [refresh, fail])
   async function action(path: string, body: unknown = {}) {
     setBusy(true); setError('')
@@ -102,7 +101,7 @@ export function ConnectionsWorkspace(props: ViewProps) {
   }
   const current = data?.connections.find(c => c.id === selected)
   const activeImport = data?.imports.some(item => active.includes(item.state))
-  return <div className="connections-workspace">
+  return <div className="connections-workspace"><PageHeading eyebrow="CONNECTIONS" title="Connections">Connect Sentry, select a time window and save the observations you need.</PageHeading>
     <SentrySetup configured={data?.configured || false} publicUrl={data?.public_url || ''} />
     {error && <p className="import-error" role="alert">{error}</p>}
     {!data && !error && <p role="status">Loading Sentry connections...</p>}
@@ -113,11 +112,10 @@ export function ConnectionsWorkspace(props: ViewProps) {
         <ConnectionRegion region={current.region} />
         {current.error && <p className="import-error">{current.error}</p>}
         {current.checked_at && <p>Last checked <FullTime value={current.checked_at} /></p>}
-        <div className="sentry-actions"><button className="button secondary" disabled={!canWrite || busy || current.state !== 'connected'} onClick={() => void action(`/connections/sentry/${current.id}/check`)}><RefreshCw size={15} />Check access</button><button className="button secondary" disabled={busy || current.state === 'disconnected'} onClick={() => void action(`/connections/sentry/${current.id}/disconnect`)}><Unplug size={15} />Disconnect</button></div>
+        <div className="sentry-actions"><button className="button secondary" disabled={!canWrite || busy || current.state !== 'connected'} onClick={() => void action(`/connections/sentry/${current.id}/check`)}><RefreshCw size={15} />Check access</button><button className="button secondary" disabled={!canWrite || busy || current.state === 'disconnected'} onClick={() => void action(`/connections/sentry/${current.id}/disconnect`)}><Unplug size={15} />Disconnect</button></div>
         {current.state !== 'connected' ? <p>Use Connect Sentry to authorize this organization again. Saved snapshots remain readable. Local disconnect does not uninstall the integration in Sentry.</p> : <ImportForm key={current.id} connection={current} disabled={!canWrite || busy || !!activeImport} onSubmit={body => action(`/connections/sentry/${current.id}/imports`, body)} />}
       </>}
     </section>
-    <section className="import-panel"><div className="section-heading"><h2>Recent imports</h2><span>Saved snapshots</span></div>{data?.imports.map(item => <SentryImportCard key={item.id} item={item} busy={busy} onOpen={() => setCollection(item.collection_id)} onAction={kind => void action(`/sentry-imports/${item.id}/${kind}`)} />)}{data && !data.imports.length && <p>Your imports will appear here. Analysis starts only when you click Investigate on saved evidence.</p>}</section>
-    {collection && <CollectionView key={collection} id={collection} {...props} />}
+    <section className="import-panel"><div className="section-heading"><h2>Recent imports</h2><span>Saved snapshots</span></div>{data?.imports.map(item => <SentryImportCard key={item.id} item={item} busy={busy} onOpen={() => navigate('collections', item.collection_id)} onAction={kind => void action(`/sentry-imports/${item.id}/${kind}`)} />)}{data && !data.imports.length && <p>Your imports will appear here. Analysis starts only when you click Investigate on saved evidence.</p>}</section>
   </div>
 }

@@ -24,6 +24,7 @@ from . import sentry_api
 from .sentry_client import SentryClient
 from .sentry_imports import ImportWorker
 from . import account_email, email_service
+from . import workspace_api
 
 def owned(request, table, record_id):
     user = auth.current(request)
@@ -41,6 +42,7 @@ def serialize_investigation(row):
     return {**{key: value for key, value in row.items() if key != "user_id"},
             "report": json.loads(row["report"]) if row["report"] else None,
             "activity": json.loads(row["activity"]), "usage": json.loads(row["usage"]),
+            "supplied_excerpts": json.loads(row["supplied_excerpts"]) if row.get("supplied_excerpts") else None,
             "supplements": [serialize_supplement(item) for item in db.all_rows(
                 "SELECT * FROM supplements WHERE investigation_id=%s AND user_id=%s ORDER BY created_at, id",
                 (row["id"], row["user_id"]))]}
@@ -48,7 +50,8 @@ def serialize_investigation(row):
 def serialize_supplement(row):
     return {**{k: v for k, v in row.items() if k != "user_id"},
             "result": json.loads(row["result"]) if row["result"] else None,
-            "source_ids": json.loads(row["source_ids"]), "usage": json.loads(row["usage"])}
+            "source_ids": json.loads(row["source_ids"]), "usage": json.loads(row["usage"]),
+            "supplied_excerpts": json.loads(row["supplied_excerpts"]) if row.get("supplied_excerpts") else None}
 
 def active_jobs(conn, owner):
     return conn.execute("SELECT COUNT(*) FROM (SELECT id FROM investigations WHERE user_id=%s AND state IN ('queued','running','quota_waiting') UNION ALL SELECT id FROM supplements WHERE user_id=%s AND state IN ('queued','running','quota_waiting'))",
@@ -76,7 +79,7 @@ async def import_logs(request):
 def collections(request):
     user = auth.current(request)
     return JSONResponse([public_collection(row) for row in db.all_rows(
-        "SELECT * FROM collections WHERE user_id=%s ORDER BY created_at DESC, id DESC", (user["id"],))])
+        "SELECT * FROM collections WHERE user_id=%s" + (" AND EXISTS (SELECT 1 FROM demo_cases d WHERE d.collection_id=collections.id)" if auth.is_demo(user) else "") + " ORDER BY created_at DESC, id DESC", (user["id"],))])
 
 
 def collection_detail(request):
@@ -89,28 +92,7 @@ def collection_detail(request):
 
 
 def collection_evidence(request):
-    row = owned(request, "collections", request.path_params["id"])
-    params = dict(request.query_params)
-    if set(params) - {"kind", "service", "query", "level", "offset", "limit"}:
-        raise HTTPException(400, "Unsupported evidence filter.")
-    try:
-        limit, offset = int(params.pop("limit", "100")), int(params.pop("offset", "0"))
-        if not 1 <= limit <= 200 or not 0 <= offset <= 5000:
-            raise ValueError()
-    except ValueError:
-        raise HTTPException(400, "Use a limit of 1-200 and offset of 0-5000.") from None
-    kind = params.pop("kind", None)
-    if kind not in {None, "log", "span", "metric"}:
-        raise HTTPException(400, "Unknown evidence kind.")
-    if "service" in params and params["service"] not in json.loads(row["summary"])["services"]:
-        raise HTTPException(400, "Unknown service in this collection.")
-    if "query" in params and not 1 <= len(params["query"]) <= 200:
-        raise HTTPException(400, "Use a search query of 1-200 characters.")
-    if "level" in params and params["level"] not in {"trace", "debug", "info", "warning", "error", "unknown"}:
-        raise HTTPException(400, "Unknown log level.")
-    rows = db.evidence(None, row["user_id"], kind, collection_id=row["id"], limit=limit + 1, offset=offset, **params)
-    return JSONResponse({"collection_id": row["id"], "evidence": rows[:limit],
-                         "next_offset": offset + limit if len(rows) > limit else None})
+    return workspace_api.rows(request)
 
 
 async def start_collection_investigation(request):
@@ -222,6 +204,8 @@ def demo_cases(request):
     return JSONResponse([json.loads(row["metadata"]) for row in db.all_rows("SELECT metadata FROM demo_cases ORDER BY position")])
 
 def run_evidence(request):
+    if set(request.query_params) - {"after", "limit"}:
+        return workspace_api.rows(request)
     row = owned(request, "runs", request.path_params["id"])
     try:
         params = dict(request.query_params)
@@ -371,6 +355,7 @@ def create_app():
         Route("/api/scenarios/reset", reset_scenario, methods=["POST"]),
     ]
     routes.extend(sentry_api.routes)
+    routes.extend(workspace_api.routes)
     if (ROOT / "dist").exists():
         routes.append(Mount("/", StaticFiles(directory=ROOT / "dist", html=True)))
     def storage_unavailable(request, exc):
@@ -391,7 +376,7 @@ def create_app():
             if user and auth.is_demo(user):
                 path = request.url.path
                 session_path = path in {"/api/auth/login", "/api/auth/demo-login", "/api/auth/logout", "/api/auth/me"}
-                read_path = path == "/api/demo/cases" or path.startswith(("/api/collections/", "/api/investigations/", "/api/evidence/"))
+                read_path = path in {"/api/demo/cases", "/api/collections", "/api/dashboard", "/api/errors", "/api/investigations", "/api/logs"} or path.startswith(("/api/collections/", "/api/investigations/", "/api/evidence/"))
                 if not session_path and (request.method not in {"GET", "HEAD"} or not read_path):
                     return JSONResponse({"error": "Demo Account is read-only. Sign in to a regular account to use this action."}, status_code=403, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
             path = request.url.path

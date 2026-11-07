@@ -12,6 +12,7 @@ from .evidence import INPUT_BYTES, encoded, representatives
 from .imports import redact_object
 from .provider import connection_failure_kind
 from .quota import delay_seconds
+from .selection import excerpt, provenance
 
 ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 TAXONOMY_VERSION = "developer-problems-v1"
@@ -41,7 +42,7 @@ def stamp(seconds=None):
 
 
 def triage_payload(context, model=JEV_MODEL):
-    candidates = representatives(list(context.records.values()))
+    candidates = [excerpt(row, 1600) for row in representatives(list(context.records.values()))]
     selected = []
 
     def build(rows):
@@ -77,7 +78,9 @@ def triage_payload(context, model=JEV_MODEL):
         raise ValueError("No useful observation fits the complete Jev input bound.")
     return payload, {"groups": [{"id": f"g{i}", "source_ids": [row["id"]]} for i, row in enumerate(selected)],
                      "source_ids": [row["id"] for row in selected], "redactions": redactions,
-                     "coverage": payload["state"]["coverage"]}
+                     "coverage": payload["state"]["coverage"],
+                     "supplied_excerpts": provenance([group["observation"] for group in payload["state"]["groups"]],
+                         getattr(context.tools, "seen", context.records), getattr(context.tools, "selection", {}))}
 
 
 def probability(value):

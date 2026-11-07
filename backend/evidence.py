@@ -22,7 +22,8 @@ COMMON = {
 }
 TRACE = {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "Nonzero W3C trace ID."}
 PROPERTIES = {
-    "search_logs": {**COMMON, "trace_id": TRACE,
+    "search_logs": {**COMMON, "trace_id": TRACE, "request_id": {"type": "string", "maxLength": 128},
+                    "error_type": {"type": "string", "description": "Explicit local error signature identifier."},
                     "query": {"type": "string", "maxLength": 200, "description": "Literal message substring."},
                     "level": {"type": "string", "enum": ["trace", "debug", "info", "warning", "error", "unknown"]}},
     "get_metrics": COMMON,
@@ -68,6 +69,12 @@ class EvidenceTools:
                     properties["trace_id"] = {"type": "string", "maxLength": 128, "description": "Recorded trace ID."}
         self.seen = {}
         self.supplied = set()
+        self.last_excerpts = []
+        self.selection = {}
+
+    def snapshot(self):
+        from .selection import fetch_owned
+        return fetch_owned(self)
 
     def call(self, name, arguments):
         if name not in TOOL_NAMES or not isinstance(arguments, dict):
@@ -82,6 +89,12 @@ class EvidenceTools:
             if not isinstance(trace, str) or not (re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", trace) if self.collection else
                     re.fullmatch(r"[0-9a-f]{32}", trace) and int(trace, 16) != 0):
                 raise ValueError("A valid nonzero trace_id is required")
+        if "request_id" in args and (not isinstance(args["request_id"], str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", args["request_id"])):
+            raise ValueError("A recorded request ID is required")
+        if "error_type" in args:
+            from .signatures import LABELS
+            if not isinstance(args["error_type"], str) or args["error_type"] not in LABELS:
+                raise ValueError("Unknown error signature")
         for field in ("start_time", "end_time"):
             if field in args:
                 args[field] = parse_time(args[field])
@@ -117,7 +130,7 @@ class EvidenceTools:
 def model_observation(row):
     # Original redacted content remains inspectable; avoid repeating it in model input.
     return {key: value for key, value in row.items() if key not in {
-        "original", "source_format", "source_id", "source_line", "source_project_id", "source_connection_id", "source_organization"}
+        "original", "collection_id", "run_id", "source_format", "source_id", "source_line", "source_end_line", "source_project_id", "source_connection_id", "source_organization", "signature_version"}
         and not (row["kind"] == "span" and ((key == "message" and value == row.get("name")) or (key == "level" and value == "unknown")))
         and not (key == "source_truncated" and value is False)}
 
@@ -127,7 +140,7 @@ def representatives(rows):
     groups = {}
     for row in rows:
         shape = {k: v for k, v in row.items() if k not in {
-            "id", "timestamp", "started_at", "trace_id", "span_id", "parent_id", "duration_ms",
+            "id", "timestamp", "started_at", "trace_id", "request_id", "span_id", "parent_id", "duration_ms",
             "last_latency_ms", "requests", "failures", "acquisition_failures"}}
         for key in ("duration_ms", "last_latency_ms"):
             if key in row:
@@ -188,11 +201,14 @@ def representatives(rows):
             for _, bucket in ordered if i < len(bucket)]
 
 def compact(rows, budget, priority=(), *, preserve_priority=False):
+    from .selection import excerpt
     groups = [row for row in rows if row["id"] in priority]
     groups += representatives([row for row in rows if row["id"] not in priority])
     result = {"records": [], "matched_records": len(rows), "omitted_groups": len(groups),
               "note": "Repeated observations use one cited representative. Omitted sources are not citation candidates."}
     for row in groups:
+        if len(encoded(row)) > min(1800, max(700, budget // 2)):
+            row = excerpt(row, min(1800, max(700, budget // 2)))
         trial = {**result, "records": result["records"] + [row], "omitted_groups": result["omitted_groups"] - 1}
         if (preserve_priority and row["id"] in priority) or len(encoded(trial)) <= budget - 40:
             result = trial
@@ -327,11 +343,12 @@ class EvidenceContext:
         self.trace_sources = set()
         self.selected_trace = None
         self.triage = None
+        self.advisory_priority = []
         self.triage_included = "not_requested"
 
     def add(self, name, args, result):
         if isinstance(result, dict):
-            self.records.update({r["id"]: r for r in result.get("records", [])})
+            self.records.update({r["id"]: model_observation(self.tools.seen[r["id"]]) if r["id"] in self.tools.seen else r for r in result.get("records", [])})
             if "configured_edges" in result:
                 self.topology = result
             if name == "get_trace":
@@ -371,7 +388,11 @@ class EvidenceContext:
             # The final table encoding can be smaller than the row encoding used
             # by tools. Fit against the complete request below; never discard a
             # required relationship merely because this intermediate form grew.
-            evidence = compact(list(self.records.values()), evidence_budget, priority, preserve_priority=True)
+            evidence = compact(list(self.records.values()), evidence_budget, priority)
+            # Advisory ranking orders already selected evidence; it cannot evict
+            # measured extremes or successful/conflicting observations.
+            rank = {ref: index for index, ref in enumerate(self.advisory_priority)}
+            evidence["records"].sort(key=lambda row: rank.get(row["id"], len(rank)))
             context = {"recent_queries": {
                            "columns": ["tool", "arguments", "returned", "omitted_groups", "query_limit_reached"],
                            "rows": [[q.get(k) for k in ("tool", "arguments", "returned", "omitted_groups", "query_limit_reached")]
@@ -397,6 +418,10 @@ class EvidenceContext:
                                             for name, value in summary["datasets"].items()}
                 context["import"] = {"symptom_claim": self.tools.collection["symptom"],
                                      "coverage": coverage}
+            if priority and not priority <= {row["id"] for row in evidence["records"]}:
+                context["evidence"]["partial_trace"] = True
+            if self.tools.selection:
+                context["selection"] = {key: value for key, value in self.tools.selection.items() if key != "sources"}
             payload = {**base, "messages": [{"role": "system", "content": system},
                 {"role": "user", "content": instruction + "\nOperational data: " + encoded(context).decode()}]}
             supplied = sorted({row["id"] for row in evidence["records"]})
@@ -405,12 +430,12 @@ class EvidenceContext:
                 schema = payload["response_format"]["json_schema"]["schema"]
                 schema["properties"]["evidence_ids"]["items"]["enum"] = supplied
                 schema["properties"]["hypotheses"]["items"]["properties"]["evidence_ids"]["items"]["enum"] = supplied
+                if "supporting_evidence" in schema["properties"]:
+                    schema["properties"]["supporting_evidence"]["items"]["properties"]["evidence_ids"]["items"]["enum"] = supplied
             excess = len(encoded(payload)) - budget
             if excess <= 0:
                 if self.records and not supplied:
                     raise ValueError("No useful observation fits the complete Groq input bound. Import smaller observations.")
-                if self.trace_sources and not self.trace_sources <= set(supplied):
-                    raise ValueError("The requested trace group cannot fit intact within the Groq input bound.")
                 # Advisory hints use spare bytes only: they never evict observations.
                 if self.triage:
                     hint = deepcopy(self.triage)
@@ -426,10 +451,10 @@ class EvidenceContext:
                             payload = augmented
                             self.triage_included = label
                             break
+                from .selection import provenance
+                self.tools.last_excerpts = provenance(evidence["records"], self.tools.seen, self.tools.selection)
                 return payload, set(supplied)
-            if not ({row["id"] for row in evidence["records"]} - priority):
-                if priority:
-                    raise ValueError("The requested trace group cannot fit intact within the Groq input bound.")
+            if not evidence["records"]:
                 raise ValueError("Groq input allowance is insufficient for the required request schema.")
             evidence_budget -= max(128, excess)
         raise ValueError("Groq input allowance is insufficient for the required request schema.")
